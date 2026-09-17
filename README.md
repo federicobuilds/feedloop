@@ -1,81 +1,83 @@
 # feedloop
 
-A learning recommendation feed over any item catalog: ranking with explanations, an
-append-only evidence ledger, explicit attribution, taste math over tags and feature
-spaces, and an autonomous tuner with a reversible ledger. The library defines six
-slots (catalog, signals, feature spaces, text encoder, identity links, annotator) that
-a host fills; `feedloop.sources.filesystem` fills them over a plain media folder so the
-package runs on its own: folder in, learning feed out. Version 0.x: the slot contracts
-are proven against the filesystem source only and may still change.
+feedloop is a recommendation feed that learns from what you watch, rate and skip, and explains every ranking in words. Point it at a folder of videos and images and it serves a local web client with a feed, search, similar items and an Engine page that shows the evidence behind each decision. Everything it learns lives in an append-only ledger next to your files, and every automatic change can be undone.
 
-## Quick start
+## Setup
+
+The package is not on PyPI. Install it from GitHub. The base install depends on numpy only. Replace `./my-media` with a folder that holds some mp4, webm, mkv, mov, m4v, jpg, jpeg, png, gif or webp files. `--fixture-sidecars` writes labelled synthetic sidecars, with timed segments for videos, for files that have none. It never touches an existing sidecar.
 
 ```sh
-pip install feedloop            # numpy only
-feedloop demo ./my-media        # creates ./my-media/.feedloop, serves on http://127.0.0.1:8765/
+git clone https://github.com/federicobuilds/feedloop
+cd feedloop
+python3.11 -m venv .venv && . .venv/bin/activate
+# Windows PowerShell instead of the line above: py -3.11 -m venv .venv; .venv\Scripts\Activate.ps1
+pip install -e .
+feedloop demo ./my-media --fixture-sidecars
 ```
 
-`demo` scans the folder (videos: mp4, webm, mkv, mov, m4v; images: jpg, jpeg,
-png, gif, webp), assigns each file a stable id, reads an optional
-`<file>.json` sidecar (`title`, `tags`, `contributors`, `duration_s`,
-`tag_seconds`), and opens the client. It prints an address that carries the
-shared key for this run in the fragment; mutations (deliveries, views, watch
-batches, feedback, tuner controls) need that key and an exact loopback origin.
-Reads (observation, search, similar, scorecard) do not.
+`demo` prints two addresses. Open the second one, `http://127.0.0.1:8765/#key=...`. The fragment carries the key that mutations (deliveries, views, watch batches, ratings, tuner controls) need. Reads work without it.
 
-The demo uses a five second attribution window and a fifteen second tick so a
-watch shows up on the Engine page within a minute. `feedloop serve` reuses an
-existing state directory with the production policy (a one hour window, six
-hour trial ripening) and never creates stores unless you pass `--init`.
+## What the demo shows
 
-### What is measured and what is not
+`demo` scans the folder, gives each file a stable id, reads an optional `<file>.json` sidecar, and serves on http://127.0.0.1:8765/.
 
-The base install decodes no media. A duration is known only when a sidecar
-states it or the browser player reports it; otherwise cards say "duration not
-measured". The demo's Search runs over a space named `sidecar_text` whose
-vectors hash the sidecar tag words; it is labelled in its metadata as not a
-measurement of the media. Text search needs window rows with real timestamps,
-so it works only for videos whose sidecar supplies timed `segments`
-(`[{"start_s": 30, "tags": ["harbor"]}]`, the author's own positions); without
-segments the space has mean vectors only and Search honestly reports
-no-feature. `feedloop demo --fixture-sidecars` writes labelled synthetic
-sidecars with such segments for files that have none. Learned spaces come from the optional
-extractors:
+- Feed: a scroll-snap column of cards. Each card explains its rank in words; an absent signal reads "not measured", never zero.
+- Home: shelves with Load more.
+- Search: text search over timed window rows. With fixture sidecars it works on videos; an item without segments reports no-feature.
+- Similar: more like one video, from tag shares blended with mean-vector similarity.
+- Engine: the scorecard, the running experiment and the reversible tuner ledger. The demo uses a five second attribution window and a fifteen second tick, so a watch shows up here within a minute.
+
+Stop the server with Ctrl-C. State lives in `<folder>/.feedloop` (`source.sqlite`, `ledger.sqlite`, `tuner.sqlite`, `spaces/`) unless you pass `--state DIR`. To serve that state again with the production policy (one hour window, six hour trial ripening), run `feedloop serve ./my-media`. `serve` never creates stores unless you pass `--init`.
+
+## Your own media and sidecars
+
+Put a `<file>.json` next to a media file. Every field is optional. Tags can be plain strings or objects with `name`, `category` and `seconds`. `duration_s` is the only way the base install knows a duration before the browser player reports one. `segments` give Search its timestamps and are your own positions, not measurements.
+
+```json
+{
+	"title": "Harbor at dawn",
+	"tags": ["harbor", {"name": "fog", "category": "weather", "seconds": 40}],
+	"contributors": ["alice"],
+	"duration_s": 95.0,
+	"tag_seconds": {"harbor": 60},
+	"segments": [{"start_s": 0, "tags": ["harbor"]}, {"start_s": 30, "tags": ["fog"]}]
+}
+```
+
+## Models
+
+The base install decodes no media. Learned feature spaces come from the optional extractors. Install them with `pip install -e '.[extract]'` (torch, open_clip_torch, pillow, transformers, soundfile).
+
+| Extractor | `--model` | Weights | Notes |
+| --- | --- | --- | --- |
+| Visual ([open_clip](https://github.com/mlfoundations/open_clip)) | `hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K` | 605 MB | Recommended. CPU and MPS are fine. |
+| Visual, larger ([open_clip](https://github.com/mlfoundations/open_clip)) | `hf-hub:laion/CLIP-ViT-L-14-laion2B-s32B-b82K` | 1.7 GB | Slower. A GPU helps. |
+| Audio ([CLAP](https://huggingface.co/laion/clap-htsat-unfused)) | `laion/clap-htsat-unfused` | 615 MB | Audio files only. |
 
 ```sh
-pip install 'feedloop[extract]'    # torch, open_clip_torch, pillow, transformers, soundfile
-feedloop extract ./my-media --kind visual --model ViT-B-32 --vocabulary tags.txt
+feedloop extract ./my-media --kind visual --model hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K --vocabulary tags.txt
 feedloop extract ./my-media --kind audio --model laion/clap-htsat-unfused
 ```
 
-The visual extractor embeds image files (video frames only through a caller
-supplied frame sampler) and writes zero-shot tags from your vocabulary to
-`<file>.generated.json`, never into your own sidecar; an existing generated
-file is kept unless you pass `--overwrite`, and even then your own fields and
-non-generated tags inside it survive. Zero-shot tags are weaker
-than a trained tagger. The audio extractor decodes with `soundfile` (audio
-files, not video containers) and doubles as the text encoder for sound search.
-Neither extractor has been run against real models in this repository yet;
-their contracts are tested with controlled doubles.
+The first run downloads the weights into the Hugging Face cache, `~/.cache/huggingface/hub`. The CLI has no `--pretrained` flag: a bare open_clip architecture name such as `ViT-B-32` builds the model with random weights, so name the model in `hf-hub:` form as in the table. Both commands take `--space NAME` (default `visual` or `audioembed`), `--device cpu|cuda|mps` and `--overwrite`. Without `--overwrite` an existing space is kept. `tags.txt` holds one zero-shot tag per line:
 
-### Client
+```
+harbor
+fog
+forest
+night
+crowd
+```
 
-`web/` is a no-build ES module client: Feed (scroll-snap column), Home
-(shelves with Load more), Search, Similar, and the Engine page with the real
-scorecard, the current experiment and the reversible tuner ledger. Every card
-explains itself in words; an absent signal reads "not measured", never zero.
+The visual extractor embeds image files and writes zero-shot tags from the vocabulary to `<file>.generated.json`. It never writes into your sidecar, and with `--overwrite` it replaces only its own fields in the generated file. The audio extractor decodes with soundfile and doubles as the text encoder for sound search. Not yet verified against real weights; video frames and container audio are not extracted.
+
+## Bring your own vectors
+
+Any extractor that writes mean vectors, and with real timestamps window rows, into a named space under `<state>/spaces/` plugs in. `space_roles` maps the visual, semantic, voice and sound roles onto your space names, and text search needs a `TextEncoder` for the same space.
 
 ## How the engine learns
 
-**The six slots and the Engine.** A host fills protocols from `feedloop.slots`:
-`Catalog` (items, files, fingerprints, tag features), `Signals` (ratings,
-engagement counts, watch history as of a known time), `FeatureSpaces` (mean
-vectors per item, optionally timed window rows), `TextEncoder` (text to a
-vector in a named space), `IdentityLinks` (trusted shared-contributor links,
-optional) and `Annotator` (tag writes, optional and never called on a read
-path). Ratings and engagement change only through two callbacks the Engine is
-constructed with. The filesystem source fills the first three and supplies the
-callbacks:
+A host fills six protocols from `feedloop.slots`: `Catalog` (items, files, fingerprints, tag features), `Signals` (ratings, engagement counts, watch history as of a known time), `FeatureSpaces` (mean vectors per item, optionally timed window rows), `TextEncoder` (text to a vector in a named space), `IdentityLinks` (trusted shared-contributor links, optional) and `Annotator` (tag writes, optional and never called on a read path). Ratings and engagement change only through two callbacks the Engine is constructed with. The filesystem source fills the first three and supplies the callbacks:
 
 ```python
 import time
@@ -94,72 +96,31 @@ page = engine.feed({"limit": 24, "images": True, "surface": "feed", "session_id"
                     "request_id": "r1", "client_request_id": "c1"})
 ```
 
-**Delivery, qualified view, outcome.** A delivery (impression) is one served
-page, journaled with its ranking generation; it proves nothing about attention.
-A qualified view is a card that stayed at least 60 percent visible for 1,200 ms
-in a foreground tab, posted by the client and journaled against the delivery.
-An outcome is evidence that follows a qualified view: watched seconds from a
-committed player batch (validated for continuity and playback speed before the
-source stores anything), an explicit rating, or an engagement count. Ratings
-trump implicit signals in both directions; the browser never asserts an outcome
-by itself.
+A delivery is one served page, journaled with its ranking generation; it proves nothing about attention. A qualified view is a card that stayed at least 60 percent visible for 1,200 ms in a foreground tab. An outcome follows a qualified view: watched seconds from a committed player batch, an explicit rating, or an engagement count. Ratings trump implicit signals in both directions.
 
-**Attribution window and tuner ripening.** Outcomes are credited to the
-delivery that preceded them only after the attribution window closes
-(production: 3,600 s; `demo`: 5 s, labelled `demo-explicit-w5-v1`). Trials then
-ripen for a further six hours before the tuner may count them. Both gates are
-visible on the Engine page; the demo shortens only the first.
+Outcomes are credited to the delivery that preceded them only after the attribution window closes (production 3,600 s; `demo` 5 s, labelled `demo-explicit-w5-v1`). Trials then ripen for six more hours before the tuner may count them. The demo shortens only the first gate.
 
-**Explicit ratings and reversible feedback.** Like, dislike, clear and count
-engagement are ledgered operations: the engine journals, then asks the
-authority to apply, then confirms with the authority's values. Undo is a new
-operation that restores the exact original value; a lost reply leaves the
-operation unresolved, blocks further actions on that item, and offers "Check
-status", which reconciles against the ledger and keeps the receipt so Undo still
-works.
+Like, dislike, clear and count engagement are ledgered operations: the engine journals, asks the authority to apply, then confirms with the authority's values. Undo restores the exact original value. A lost reply blocks further actions on that item and offers Check status, which reconciles against the ledger and keeps the receipt so Undo still works.
 
-**Self-grading promotion with undo.** The tuner runs one experiment at a time
-(base versus candidate value of one knob). Once each arm has enough ripened
-trials across enough sessions, and the difference is significant and does not
-collapse category diversity, it promotes the winner by itself and rotates to the
-next knob; otherwise it stalls or waits. Every move is a ledger row with its
-evidence and can be reverted from the Engine page; reset restores the standard
-values. Knob values are not enjoyment probabilities.
+The tuner runs one experiment at a time, base against candidate for one knob. Once each arm has enough ripened trials across enough sessions, and the difference is significant and does not collapse category diversity, it promotes the winner by itself and rotates to the next knob. Every move is a ledger row that the Engine page can revert; reset restores the standard values.
 
-**Cursor-stable pagination.** A page carries a cursor bound to its ranking
-generation. When the generation is gone (a restart, changed features, a
-changed catalog) the server refuses the cursor explicitly; the client restarts
-once from the top with fresh delivery identities, keeps the cards it has, drops
-duplicates, and re-arms that single restart only when new content arrives.
-Repeated refusals become a Retry, never a loop.
+A page carries a cursor bound to its ranking generation. When the generation is gone (a restart, changed features, a changed catalog) the server refuses the cursor, and the client restarts once from the top, keeps its cards and drops duplicates. Repeated refusals become a Retry, never a loop.
 
-**Bring your own models.** Feature spaces are files; any extractor that writes
-mean vectors (and, with real timestamps, window rows) into a named space plugs
-in, and `space_roles` maps the visual, semantic, voice and sound roles onto
-your names. Text search needs an encoder for the same space. Zero-shot tags are
-weaker than a trained tagger; unavailable features are reported as unavailable,
-not zero.
+## Limits (v0.x)
 
-**v0.x limitations.** The slot contracts are proven against the filesystem
-source only and may change before 1.0. Text search requires window rows with
-real timestamps (sidecar segments or a timed extractor); a means-only space is
-no-feature for Search while Similar and the Feed still use its means. Video
-frame sampling and container audio decoding are not shipped.
+- The slot contracts are proven against the filesystem source only and may change before 1.0.
+- Search needs window rows with real timestamps (sidecar `segments` or a timed extractor). A means-only space is no-feature for Search while Similar and the Feed still use its means.
+- The base install decodes no media; durations come from sidecars or the browser player.
+- Video frame sampling and container audio decoding are not shipped; the extractors have not run against real weights in this repository.
+- Zero-shot tags are weaker than a trained tagger. Knob values are not enjoyment probabilities.
 
 ## Evaluation
 
-`experimental/evaluation/` ports an offline evaluator (frozen snapshots, pinned
-ranking sources, observed-label metrics). It is outside the public API and the
-test gates, and it carries the label **no validated measurement yet**: nothing
-in this repository measures the engine's quality, causal lift or ranking
-superiority. See `experimental/evaluation/README.md`.
+`experimental/evaluation/` ports an offline evaluator (frozen snapshots, pinned ranking sources, observed-label metrics) outside the public API and the test gates. It carries the label **no validated measurement yet**: nothing in this repository measures the engine's quality, causal lift or ranking superiority.
 
 ## License
 
-`LICENSE` (GNU Affero General Public License v3.0 or later, AGPL-3.0-or-later)
-governs use; `COMMERCIAL-LICENSE.md` describes the commercial option for
-organizations that cannot comply with the AGPL; `CLA.md` is the contributor
-license agreement.
+`LICENSE` is the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). `COMMERCIAL-LICENSE.md` describes the commercial option for organizations that cannot comply with the AGPL, and `CLA.md` is the contributor license agreement.
 
 ## Repository layout
 
@@ -175,4 +136,3 @@ scripts/check_client.py  Playwright browser contract runner
 experimental/evaluation  frozen offline evaluator (not installed; see its README)
 tests/                   pure unit tests
 ```
-
