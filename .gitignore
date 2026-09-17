@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.handback-*.md
+.pytest_cache/
+*.egg-info/
+build/

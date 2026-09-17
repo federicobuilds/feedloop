@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feedloop"
+version = "0.1.0"
+description = "A learning recommendation feed: ranking, an append-only evidence ledger, attribution and taste math over any item catalog."
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [{name = "federicobuilds"}]
+dependencies = ["numpy"]
+classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+serve = []
+extract = ["torch", "open_clip_torch", "pillow", "transformers", "soundfile"]
+
+[project.scripts]
+feedloop = "feedloop.cli:main"
+
+[tool.setuptools]
+packages = ["feedloop", "feedloop.sources", "feedloop.extractors", "feedloop.server", "feedloop.server.web"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+"feedloop.server.web" = "web"
+
+[tool.setuptools.package-data]
+"feedloop.server.web" = ["*.html", "*.css", "*.js", "*.svg", "*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

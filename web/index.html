@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0f1418">
+<title>feedloop</title>
+<link rel="stylesheet" href="/styles.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="shell">
+  <nav class="rail" aria-label="Views">
+    <a class="brand" href="#/feed" translate="no">feed<span>loop</span></a>
+    <ul>
+      <li><a href="#/feed" data-view="feed">Feed</a></li>
+      <li><a href="#/home" data-view="home">Home</a></li>
+      <li><a href="#/search" data-view="search">Search</a></li>
+      <li><a href="#/similar" data-view="similar">Similar</a></li>
+      <li><a href="#/engine" data-view="engine">Engine</a></li>
+    </ul>
+    <p class="rail-note" id="rail-note" aria-live="polite"></p>
+  </nav>
+  <main id="main" class="main" tabindex="-1"></main>
+</div>
+<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>
