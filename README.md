@@ -46,20 +46,20 @@ Put a `<file>.json` next to a media file. Every field is optional. Tags can be p
 
 ## Models
 
-The base install decodes no media. Learned feature spaces come from the optional extractors. Install them with `pip install -e '.[extract]'` (torch, open_clip_torch, pillow, transformers, soundfile).
+The base install decodes no media. Learned feature spaces come from the optional extractors. Install them with `pip install -e '.[extract]'` (torch, open_clip_torch, pillow, transformers, soundfile, imageio-ffmpeg). imageio-ffmpeg ships an ffmpeg binary, about 80 MB, so no system ffmpeg is needed.
 
 | Extractor | `--model` | Weights | Notes |
 | --- | --- | --- | --- |
-| Visual ([open_clip](https://github.com/mlfoundations/open_clip)) | `hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K` | 605 MB | Recommended. CPU and MPS are fine. |
+| Visual ([open_clip](https://github.com/mlfoundations/open_clip)) | `ViT-B-32` (same weights as `hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K`) | 605 MB | Recommended. CPU and MPS are fine. |
 | Visual, larger ([open_clip](https://github.com/mlfoundations/open_clip)) | `hf-hub:laion/CLIP-ViT-L-14-laion2B-s32B-b82K` | 1.7 GB | Slower. A GPU helps. |
-| Audio ([CLAP](https://huggingface.co/laion/clap-htsat-unfused)) | `laion/clap-htsat-unfused` | 615 MB | Audio files only. |
+| Audio ([CLAP](https://huggingface.co/laion/clap-htsat-unfused)) | `laion/clap-htsat-unfused` | 615 MB | Reads the audio track of each video. |
 
 ```sh
-feedloop extract ./my-media --kind visual --model hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K --vocabulary tags.txt
+feedloop extract ./my-media --kind visual --model ViT-B-32 --vocabulary tags.txt
 feedloop extract ./my-media --kind audio --model laion/clap-htsat-unfused
 ```
 
-The first run downloads the weights into the Hugging Face cache, `~/.cache/huggingface/hub`. The CLI has no `--pretrained` flag: a bare open_clip architecture name such as `ViT-B-32` builds the model with random weights, so name the model in `hf-hub:` form as in the table. Both commands take `--space NAME` (default `visual` or `audioembed`), `--device cpu|cuda|mps` and `--overwrite`. Without `--overwrite` an existing space is kept. `tags.txt` holds one zero-shot tag per line:
+The first run downloads the weights into the Hugging Face cache, `~/.cache/huggingface/hub`. A bare open_clip architecture name loads pretrained weights: `--pretrained TAG` picks the open_clip weights tag, the default for `ViT-B-32` is `laion2b_s34b_b79k`, and any other bare name gets the first tag open_clip lists for it (`open_clip.list_pretrained_tags_by_model`). A bare name open_clip lists no weights for stops with an error that names `--pretrained`. An `hf-hub:` name carries its own weights and ignores the default. Both commands take `--space NAME` (default `visual` or `audioembed`), `--device cpu|cuda|mps` and `--overwrite`. Without `--overwrite` an existing space is kept. `tags.txt` holds one zero-shot tag per line:
 
 ```
 harbor
@@ -69,7 +69,7 @@ night
 crowd
 ```
 
-The visual extractor embeds image files and writes zero-shot tags from the vocabulary to `<file>.generated.json`. It never writes into your sidecar, and with `--overwrite` it replaces only its own fields in the generated file. The audio extractor decodes with soundfile and doubles as the text encoder for sound search. Not yet verified against real weights; video frames and container audio are not extracted.
+The visual extractor embeds image files and writes zero-shot tags from the vocabulary to `<file>.generated.json`. It never writes into your sidecar, and with `--overwrite` it replaces only its own fields in the generated file. A video is embedded as the mean of 8 frames that ffmpeg grabs at evenly spaced timestamps. The audio extractor decodes each video's audio track with ffmpeg and doubles as the text encoder for sound search. A file ffmpeg cannot read, such as an empty file or a video without an audio track, is skipped and named in the report. Verified with real weights on an M1 Max (`--device mps`).
 
 ## Bring your own vectors
 

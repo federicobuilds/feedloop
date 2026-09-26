@@ -2,19 +2,21 @@
 
 ``load()`` imports torch and transformers and opens the CLAP checkpoint. Audio is
 decoded by a caller-supplied decoder (``path -> (waveform, sample_rate)``) or, by
-default, ``soundfile``, which reads audio files but not the audio track of a video
-container; a file the decoder cannot open is skipped and named in the report. The
+default, ffmpeg from the ``imageio-ffmpeg`` wheel in the extra, which reads the audio
+track of video containers (``soundfile_decoder`` remains for plain audio files); a file
+the decoder cannot open, or one with no audio track, is skipped and named in the report. The
 written space holds one mean vector per item (no windows) labelled with the model name; ``encode`` returns
 the matching text vector for exactly that space and ``None`` for any other.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Callable, Sequence
 
 import numpy as np
 
-from feedloop.extractors import require
+from feedloop.extractors import MissingExtra, require
 from feedloop.sources.filesystem import FilesystemSource
 
 
@@ -36,19 +38,33 @@ class ClapBackend:
 
     def embed_audio(self, waveforms: Sequence[np.ndarray]) -> np.ndarray:
         with self.torch.no_grad():
-            inputs = self.processor(audios=[np.asarray(w, dtype=np.float32) for w in waveforms], sampling_rate=self.sample_rate, return_tensors="pt")
-            return self.model.get_audio_features(**{k: v.to(self.device) for k, v in inputs.items()}).float().cpu().numpy()
+            inputs = self.processor(audio=[np.asarray(w, dtype=np.float32) for w in waveforms], sampling_rate=self.sample_rate, return_tensors="pt")
+            return self.features(self.model.get_audio_features(**{k: v.to(self.device) for k, v in inputs.items()}))
 
     def embed_texts(self, texts: Sequence[str]) -> np.ndarray:
         with self.torch.no_grad():
             inputs = self.processor(text=list(texts), return_tensors="pt", padding=True)
-            return self.model.get_text_features(**{k: v.to(self.device) for k, v in inputs.items()}).float().cpu().numpy()
+            return self.features(self.model.get_text_features(**{k: v.to(self.device) for k, v in inputs.items()}))
+
+    def features(self, output) -> np.ndarray:
+        # 2026-09-26: transformers 5 returns a ModelOutput whose pooler_output holds the projected vectors; 4.x returned the tensor.
+        tensor = output if isinstance(output, self.torch.Tensor) else output.pooler_output
+        return tensor.float().cpu().numpy()
 
 
 def soundfile_decoder(path: Path):
     soundfile = require("soundfile", purpose="the default audio decoder")
     data, rate = soundfile.read(str(path), dtype="float32", always_2d=True)
     return data.mean(axis=1), int(rate)
+
+
+def ffmpeg_decoder(path: Path, *, rate: int = 48000):
+    """The mono audio track of any container ffmpeg reads, as float32 at ``rate``."""
+    ffmpeg = require("imageio_ffmpeg", purpose="the default audio decoder").get_ffmpeg_exe()
+    run = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"], capture_output=True)
+    if run.returncode != 0 or not run.stdout:
+        raise OSError(run.stderr.decode("utf-8", "replace").strip() or f"no audio track in {path.name}")
+    return np.frombuffer(run.stdout, dtype="<f4").copy(), rate
 
 
 def resample(waveform: np.ndarray, rate: int, target: int) -> np.ndarray:
@@ -67,7 +83,7 @@ class AudioExtractor:
     def __init__(self, model: str, *, device="cpu", backend=None, decoder: Callable[[Path], tuple[np.ndarray, int]] | None = None, space="audioembed"):
         self.model = model
         self.backend = backend if backend is not None else ClapBackend(model, device=device)
-        self.decoder = decoder if decoder is not None else soundfile_decoder
+        self.decoder = decoder if decoder is not None else ffmpeg_decoder
         self.space = space
         self.loaded = False
 
@@ -100,6 +116,8 @@ class AudioExtractor:
             for key, entry in rows[start:start + batch_size]:
                 try:
                     waveform, rate = self.decoder(source.folder / entry["relpath"])
+                except MissingExtra:
+                    raise
                 except Exception as exc:
                     skipped[f"{key[0]}:{key[1]}"] = "undecodable:" + type(exc).__name__
                     continue
@@ -116,4 +134,4 @@ class AudioExtractor:
         return {"space": space, "model": self.model, "items": len(keys), "skipped": skipped, "revision": revision}
 
 
-__all__ = ["AudioExtractor", "ClapBackend", "soundfile_decoder", "resample", "unit_rows"]
+__all__ = ["AudioExtractor", "ClapBackend", "ffmpeg_decoder", "soundfile_decoder", "resample", "unit_rows"]

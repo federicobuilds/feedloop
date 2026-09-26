@@ -3,25 +3,66 @@
 The extractor is explicit: construction stores names only; ``load()`` imports torch
 and open_clip and downloads or opens the weights; ``extract_folder`` embeds the
 folder's image files and writes one means-only feature space labelled with the
-model name. Video frames are embedded only when the caller supplies a frame
-sampler, because the base package decodes no media. Zero-shot tags are the
+model name. A bare open_clip architecture name gets pretrained weights (see
+``resolve_pretrained``) instead of random ones. Videos are embedded as the mean of
+frames sampled by ffmpeg (from the ``imageio-ffmpeg`` wheel in the extra) unless the
+caller supplies its own frame sampler. Zero-shot tags are the
 softmax over cosine similarities to the vocabulary's prompts and are weaker than
 a trained tagger; they are written to a separate generated file that never
 touches the user's own sidecar.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 import numpy as np
 
-from feedloop.extractors import require
+from feedloop.extractors import MissingExtra, MissingWeights, require
 from feedloop.sources.filesystem import GENERATED_SUFFIX, FilesystemSource, sidecar_path_reason
 
 DEFAULT_PROMPT = "a photo of {}"
+DEFAULT_PRETRAINED = {"ViT-B-32": "laion2b_s34b_b79k"}
+FRAMES_PER_VIDEO = 8
+
+
+def resolve_pretrained(model: str, pretrained: str | None, listed_tags: Sequence[str]) -> str | None:
+    """The weights tag for ``model``: the explicit tag; none for a prefixed name such as
+    ``hf-hub:org/repo``, which carries its own weights; ``laion2b_s34b_b79k`` for bare
+    ``ViT-B-32``; otherwise the first tag open_clip lists for the architecture."""
+    if pretrained or ":" in model:
+        return pretrained
+    if model in DEFAULT_PRETRAINED:
+        return DEFAULT_PRETRAINED[model]
+    if listed_tags:
+        return listed_tags[0]
+    raise MissingWeights(f"open_clip lists no pretrained weights for model '{model}'; pass --pretrained TAG or use an hf-hub: model name")
+
+
+def ffmpeg_frame_sampler(path: Path, *, frames: int = FRAMES_PER_VIDEO) -> list:
+    """``frames`` RGB images at evenly spaced timestamps; an unreadable file raises OSError."""
+    ffmpeg = require("imageio_ffmpeg", purpose="the video frame sampler").get_ffmpeg_exe()
+    image_module = require("PIL.Image", purpose="the video frame sampler")
+    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, errors="replace")
+    found = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", probe.stderr)
+    if not found:
+        raise OSError(f"ffmpeg found no duration in {path.name}")
+    hours, minutes, seconds = found.groups()
+    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    images = []
+    for index in range(frames):
+        at = duration * (index + 0.5) / frames
+        grab = subprocess.run([ffmpeg, "-v", "error", "-ss", f"{at:.3f}", "-i", str(path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+                              capture_output=True)
+        if grab.returncode == 0 and grab.stdout:
+            with image_module.open(io.BytesIO(grab.stdout)) as image:
+                images.append(image.convert("RGB"))
+    return images
 
 
 class OpenClipBackend:
@@ -36,6 +77,7 @@ class OpenClipBackend:
         self.torch = require("torch", purpose="the visual extractor")
         open_clip = require("open_clip", purpose="the visual extractor")
         require("PIL", purpose="the visual extractor")
+        self.pretrained = resolve_pretrained(self.model_name, self.pretrained, open_clip.list_pretrained_tags_by_model(self.model_name))
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(self.model_name, pretrained=self.pretrained, device=self.device)
         self.tokenizer = open_clip.get_tokenizer(self.model_name)
         self.model.eval()
@@ -84,7 +126,7 @@ class VisualExtractor:
         self.backend = backend if backend is not None else OpenClipBackend(model, pretrained=pretrained, device=device)
         self.vocabulary = [w.strip() for w in (vocabulary or []) if w and w.strip()]
         self.prompt = prompt
-        self.frame_sampler = frame_sampler
+        self.frame_sampler = frame_sampler if frame_sampler is not None else ffmpeg_frame_sampler
         self.loaded = False
 
     def load(self):
@@ -105,7 +147,7 @@ class VisualExtractor:
         return zero_shot_tags(vectors, words, self.vocabulary)
 
     def extract_folder(self, source: FilesystemSource, *, space="visual", write_tags=True, overwrite=False, batch_size=16) -> dict:
-        """Embed every image (and every video the frame sampler can open) and write the space."""
+        """Embed every image and every video the frame sampler can open, and write the space."""
         self.load()
         if space in source.spaces() and not overwrite:
             return {"space": space, "model": self.model, "items": 0, "skipped": {}, "revision": source.revision(space), "zero_shot_tags": {},
@@ -120,16 +162,20 @@ class VisualExtractor:
                 if key[0] == "image":
                     images.append(self.backend.open_image(path))
                     batch.append(key)
-                elif self.frame_sampler is not None:
-                    frames = list(self.frame_sampler(path))
+                else:
+                    try:
+                        frames = list(self.frame_sampler(path))
+                    except MissingExtra:
+                        raise
+                    except Exception as exc:
+                        skipped[f"{key[0]}:{key[1]}"] = "undecodable:" + type(exc).__name__
+                        continue
                     if not frames:
                         skipped[f"{key[0]}:{key[1]}"] = "no_frames"
                         continue
                     frame_vectors = unit_rows(self.backend.embed_images(frames))
                     keys.append(key)
                     vectors.append(unit_rows(frame_vectors.mean(axis=0, keepdims=True))[0])
-                else:
-                    skipped[f"{key[0]}:{key[1]}"] = "no_frame_sampler"
             if images:
                 embedded = unit_rows(self.backend.embed_images(images))
                 keys.extend(batch)
@@ -185,4 +231,4 @@ def write_generated_tags(source: FilesystemSource, key, tags: Sequence[tuple[str
     return path
 
 
-__all__ = ["VisualExtractor", "OpenClipBackend", "zero_shot_tags", "unit_rows", "write_generated_tags", "DEFAULT_PROMPT", "GENERATED_FIELDS"]
+__all__ = ["VisualExtractor", "OpenClipBackend", "resolve_pretrained", "ffmpeg_frame_sampler", "DEFAULT_PRETRAINED", "zero_shot_tags", "unit_rows", "write_generated_tags", "DEFAULT_PROMPT", "GENERATED_FIELDS"]

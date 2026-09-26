@@ -18,4 +18,8 @@ def require(module: str, *, purpose: str):
         raise MissingExtra(f"{purpose} needs the optional module '{module}'; install the extractor extra with: {EXTRA_HINT}") from exc
 
 
-__all__ = ["MissingExtra", "require", "EXTRA_HINT"]
+class MissingWeights(ValueError):
+    """A model name that names no pretrained weights; loading it would give random weights."""
+
+
+__all__ = ["MissingExtra", "MissingWeights", "require", "EXTRA_HINT"]

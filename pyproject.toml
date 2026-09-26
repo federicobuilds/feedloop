@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feedloop"
-version = "0.2.0"
+version = "0.3.0"
 description = "A learning recommendation feed: ranking, an append-only evidence ledger, attribution and taste math over any item catalog."
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
@@ -15,7 +15,7 @@ classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3 
 [project.optional-dependencies]
 dev = ["pytest"]
 serve = []
-extract = ["torch", "open_clip_torch", "pillow", "transformers", "soundfile"]
+extract = ["torch", "open_clip_torch", "pillow", "transformers", "soundfile", "imageio-ffmpeg"]
 
 [project.scripts]
 feedloop = "feedloop.cli:main"

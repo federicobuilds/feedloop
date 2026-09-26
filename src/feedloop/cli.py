@@ -81,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--kind", choices=("visual", "audio"), required=True, help="visual (CLIP/SigLIP) or audio (CLAP)")
     extract.add_argument("--model", required=True, help="model identifier passed to the extractor family")
     extract.add_argument("--space", default=None, help="feature space name to write (default: visual or audioembed)")
+    extract.add_argument("--pretrained", default=None, help="visual only: open_clip weights tag (default laion2b_s34b_b79k for ViT-B-32, else open_clip's first listed tag)")
     extract.add_argument("--vocabulary", default=None, help="visual only: text file with one zero-shot tag per line")
     extract.add_argument("--device", default="cpu")
     extract.add_argument("--overwrite", action="store_true", help="replace an existing space and the generated fields of existing <file>.generated.json files; user fields are always kept")
@@ -143,7 +144,7 @@ def run_serve(args):
 
 
 def run_extract(args):
-    from feedloop.extractors import MissingExtra
+    from feedloop.extractors import MissingExtra, MissingWeights
     from feedloop.sources.filesystem import FilesystemSource
     folder = Path(args.folder)
     if not folder.is_dir():
@@ -154,13 +155,13 @@ def run_extract(args):
         if args.kind == "visual":
             from feedloop.extractors.visual import VisualExtractor
             vocabulary = Path(args.vocabulary).read_text(encoding="utf-8").splitlines() if args.vocabulary else None
-            extractor = VisualExtractor(args.model, device=args.device, vocabulary=vocabulary)
+            extractor = VisualExtractor(args.model, device=args.device, pretrained=args.pretrained, vocabulary=vocabulary)
             report = extractor.extract_folder(source, space=args.space or "visual", overwrite=args.overwrite)
         else:
             from feedloop.extractors.audio import AudioExtractor
             extractor = AudioExtractor(args.model, device=args.device)
             report = extractor.extract_folder(source, space=args.space or "audioembed", overwrite=args.overwrite)
-    except MissingExtra as exc:
+    except (MissingExtra, MissingWeights) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     print(report)
