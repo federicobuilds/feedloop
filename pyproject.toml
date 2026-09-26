@@ -15,7 +15,7 @@ classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3 
 [project.optional-dependencies]
 dev = ["pytest"]
 serve = []
-extract = ["torch", "open_clip_torch", "pillow", "transformers", "soundfile", "imageio-ffmpeg"]
+extract = ["torch", "open_clip_torch", "pillow", "transformers>=5", "soundfile", "imageio-ffmpeg"]
 
 [project.scripts]
 feedloop = "feedloop.cli:main"
