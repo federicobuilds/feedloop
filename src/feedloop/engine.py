@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Sequence
 
+import numpy as np
+
 from feedloop import catalog as catalog_module
 from feedloop import discovery, ledger, ranking, serving, tuning
 from feedloop.slots import DEFAULT_SPACE_ROLES
@@ -35,6 +37,7 @@ DEFAULT_CONFIG = dict(
 DEFAULT_ATTRIBUTION = {"window_s": ledger.ATTRIBUTION_WINDOW_S, "policy_revision": ledger.ATTRIBUTION_POLICY_REVISION,
                        "min_advance_s": ledger.ATTRIBUTION_MIN_ADVANCE_S}
 _OMITTED = object()
+WINDOWS_MEMO_MAX = 200_000
 
 
 def _iso(ts: float) -> str:
@@ -43,6 +46,75 @@ def _iso(ts: float) -> str:
 
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False, default=str).encode()).hexdigest()
+
+
+def fallback_ids(exclude, limit, *, enumerate_ids, eligible_ids=None, seed=None):
+    """Eligible ids minus exclude, cut to limit: seeded shuffle, or ascending when seed is None.
+
+    2026-09-16, upstreamed 2026-09-26: enumerate_ids is called only when no eligibility
+    set is given, so a caller can defer a whole-catalog scan until a fallback is needed.
+    """
+    ids = sorted(set(enumerate_ids() if eligible_ids is None else eligible_ids) - set(exclude))
+    if seed is not None:
+        random.Random(seed).shuffle(ids)
+    return ids[:limit]
+
+
+def random_control(candidates, exclude, *, eligible_ids=None, seed=0):
+    """Seeded control pick: least md5(str(id) + str(seed)) hex digest, ties by id; None when nothing remains."""
+    if eligible_ids is not None and not eligible_ids:
+        return None
+    allowed = None if eligible_ids is None else set(eligible_ids)
+    pool = [c for c in candidates if c not in exclude and (allowed is None or c in allowed)]
+    if not pool:
+        return None
+    return min(pool, key=lambda c: (hashlib.md5((str(c) + str(seed)).encode()).hexdigest(), c))
+
+
+def best_windows(query, ids, *, read, revision, cache, memo_max=WINDOWS_MEMO_MAX):
+    """read(query, ids) -> {id: t} through a per-(query, id) memo.
+
+    2026-09-16, upstreamed 2026-09-26: a best window depends only on the item's committed
+    embeddings and the exact query vector, so it is memoized under revision(); a reset of
+    cache or a revision change drops the memo, and a failed read publishes nothing.
+    """
+    if query is None or not ids:
+        return {}
+    signature = revision()
+    ids = list(ids)
+    if signature is None:
+        try:
+            return read(query, ids)
+        except Exception:
+            return {}
+    query_id = hashlib.sha256(np.ascontiguousarray(query, dtype=np.float32).tobytes()).hexdigest()
+    with cache.lock:
+        generation = cache.generation
+        memo = cache.value if cache.sig == signature and cache.fresh() else {}
+        known = {i: memo[(query_id, i)] for i in ids if (query_id, i) in memo}
+    missing = [i for i in ids if i not in known]
+    result = None
+    if missing:
+        try:
+            result = read(query, missing)
+        except Exception:
+            pass
+        else:
+            known.update((i, result.get(i)) for i in missing)
+    unchanged = revision() == signature
+    with cache.lock:
+        unchanged = unchanged and generation == cache.generation
+        if unchanged and result is not None:
+            memo = cache.value if cache.sig == signature and cache.value is not None else {}
+            if len(memo) + len(missing) > memo_max:
+                memo = {}
+            memo.update(((query_id, i), known[i]) for i in missing)
+            cache.set(memo, sig=signature, generation=generation)
+    if not unchanged:
+        # a reset or a revision change between the memo read and here means known may mix
+        # revisions; nothing is served and nothing is published
+        return {}
+    return {i: t for i, t in known.items() if t is not None}
 
 
 def initialize_stores(*, ledger_path, tuner_path, cutover_ts, clock=time.time, registry=tuning.TUNER_REGISTRY):
@@ -193,6 +265,7 @@ class Engine:
             "session_id": payload["session_id"], "client_request_id": payload["client_request_id"], "request_id": payload["request_id"],
             "cursor": json.dumps(payload["cursor"], sort_keys=True, separators=(",", ":")) if payload.get("cursor") is not None else "",
         }
+        started = time.time()
         try:
             ranked = self._rank(config_fields, limit=payload["limit"], offset=payload["offset"], include_secondary=payload["images"])
         except ValueError as error:
@@ -205,10 +278,12 @@ class Engine:
             code = message if re.fullmatch(r"[a-z][a-z0-9_]{2,64}", message) else None
             detail = type(exc).__name__ + (": " + code if code else "")
             return {"items": [], "profile": {}, "status": "unavailable", "error": "recommender unavailable", "error_detail": detail}
+        serving.stage_add("ranker", time.time() - started)
         result = serving.build_feed(ranked, names=self.tag_names(), offset=payload["offset"], kinds=self.kinds)
         if result.get("items") and result.get("status") in ("ok", "partial"):
-            result = serving.serve_feed(result, payload, ledger_path=self.ledger_path, resolve_eligibility=self.resolve_eligibility,
-                                        clock=self.clock, kinds=self.kinds)
+            with serving.staged("delivery"):
+                result = serving.serve_feed(result, payload, ledger_path=self.ledger_path, resolve_eligibility=self.resolve_eligibility,
+                                            clock=self.clock, kinds=self.kinds)
             self.tuner.maybe_tick()
         return result
 
@@ -429,4 +504,5 @@ class Engine:
         return serving.build_scorecard(self.tuner, ledger_path=self.ledger_path, clock=self.clock)
 
 
-__all__ = ["Engine", "initialize_stores", "DEFAULT_CONFIG", "DEFAULT_ATTRIBUTION", "RANKING_REVISION"]
+__all__ = ["Engine", "initialize_stores", "DEFAULT_CONFIG", "DEFAULT_ATTRIBUTION", "RANKING_REVISION",
+           "WINDOWS_MEMO_MAX", "fallback_ids", "random_control", "best_windows"]

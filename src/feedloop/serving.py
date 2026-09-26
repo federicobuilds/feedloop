@@ -7,6 +7,8 @@ qualified view; pure ranking and envelope building record nothing.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import contextvars
 import copy
 import hashlib
 import json
@@ -25,6 +27,59 @@ VIEW_SURFACES = ("home", "feed", "shuffle", "search")
 VISIBILITY_POLICY = "foreground-60pct-1200ms-v1"
 IMPRESSION_WINDOW_DAYS = 14.0
 CURSOR_TTL_S = 3600.0
+# Per-request stage durations: a caller sets a dict here and every stage that runs inside
+# the request adds its seconds to it (asyncio.to_thread copies the context).
+STAGE_TIMINGS = contextvars.ContextVar("feedloop_stage_timings", default=None)
+# the reads and the selector inside the ranker, in call order
+RANKER_STAGES = ("state", "candidates_sql", "affinity", "image_lane", "explore_sql", "selection", "fallback_enum", "windows")
+
+
+def stage_add(name, seconds):
+    stages = STAGE_TIMINGS.get()
+    if stages is not None:
+        stages[name] = stages.get(name, 0.0) + seconds
+
+
+def stage_total(prefix):
+    """Seconds recorded so far under stages named `prefix*`; lets an enclosing stage report exclusive time."""
+    return sum(value for key, value in (STAGE_TIMINGS.get() or {}).items() if key.startswith(prefix))
+
+
+@contextmanager
+def staged(name):
+    """Record a stage exclusive of any matrix a builder loaded inside it.
+
+    2026-09-16, upstreamed 2026-09-26: a residual ranking figure hid every read inside
+    the ranker; these stages attribute it.
+    """
+    started, nested = time.time(), stage_total("matrix_")
+    try:
+        yield
+    finally:
+        stage_add(name, time.time() - started - (stage_total("matrix_") - nested))
+
+
+def stage_line(surface, offset, status, stages, total):
+    """One line per Feed request with stage seconds; aggregates only, never items.
+
+    The stages partition the ranker's wall time: profile (hit or build, exclusive of
+    matrices), one matrix_<space> per embedding matrix built, fingerprint, hydration,
+    RANKER_STAGES and ranking (the rest); delivery is the ledger write, total the request.
+    """
+    matrices = {key[len("matrix_"):]: value for key, value in stages.items() if key.startswith("matrix_")}
+    profile = "build" if "profile_build" in stages else "hit" if "profile_hit" in stages else "none"
+    profile_s = stages.get("profile_build", stages.get("profile_hit", 0.0))
+    fingerprint, hydration = stages.get("fingerprint", 0.0), stages.get("hydration", 0.0)
+    inner = {name: stages.get(name, 0.0) for name in RANKER_STAGES}
+    ranking = max(stages.get("ranker", 0.0) - profile_s - sum(matrices.values()) - fingerprint - hydration
+                  - sum(inner.values()), 0.0)
+    parts = ["surface=" + str(surface), "offset=" + str(offset), "status=" + str(status), "total=%.2f" % total,
+             "profile=%s:%.2f" % (profile, profile_s), "matrices=%.2f" % sum(matrices.values())]
+    parts += ["matrix_%s=%.2f" % (name, seconds) for name, seconds in sorted(matrices.items())]
+    parts += ["fingerprint=%.2f" % fingerprint]
+    parts += ["%s=%.2f" % (name, inner[name]) for name in RANKER_STAGES]
+    parts += ["ranking=%.2f" % ranking, "hydration=%.2f" % hydration, "delivery=%.2f" % stages.get("delivery", 0.0)]
+    return "feed stages " + " ".join(parts)
 
 
 def digest(value):
@@ -446,4 +501,5 @@ def build_scorecard(tuner: tuning.Tuner, *, ledger_path, clock=time.time):
 __all__ = ["FEED_REQUEST_FIELDS", "SURFACES", "VIEW_SURFACES", "VISIBILITY_POLICY", "IMPRESSION_WINDOW_DAYS", "CURSOR_TTL_S",
            "digest", "feed_request", "feed_intent", "intent_fields", "feed_eligibility", "feed_time", "feed_reason",
            "tag_names_for", "ranking_response", "continue_cursor", "first_page", "build_feed", "serve_feed", "view_request",
-           "build_fatigue", "build_scorecard"]
+           "build_fatigue", "build_scorecard", "STAGE_TIMINGS", "RANKER_STAGES", "stage_add", "stage_total", "staged",
+           "stage_line"]

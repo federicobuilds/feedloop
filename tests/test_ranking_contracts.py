@@ -844,8 +844,9 @@ class SelectionContracts(OfflineTestCase):
         self.assertEqual(RANKING.select([], want=20, diversity=1, calibration=1, target_shares={}), [])
 
     def test_pairwise_work_is_incremental(self):
-        cosine = Mock(wraps=RANKING.cosine)
-        with patch.object(RANKING_MODULE, "cosine", cosine):
+        # 2026-09-26: select compares through cosine_normed with norms reduced once per call
+        cosine = Mock(wraps=RANKING.cosine_normed)
+        with patch.object(RANKING_MODULE, "cosine_normed", cosine):
             RANKING.select(fixture(5, 60), want=20, diversity=0.35, calibration=0.25, target_shares={})
         self.assertLessEqual(cosine.call_count, 60 * 20)
 

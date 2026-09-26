@@ -2,7 +2,7 @@
 
 Only initialize_event_store creates storage. Other commands require an initialized
 file; readers open mode=ro and return status=unavailable rather than creating it.
-The existing rec_impressions.db is the intended path; no path is opened implicitly.
+The existing ledger database is the intended path; no path is opened implicitly.
 
 record_served accepts the rec_requests fields, with config/arms as JSON mappings
 instead of config_json/arms_json; config_hash is computed (or checked if supplied).

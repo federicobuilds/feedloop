@@ -8,7 +8,7 @@ from feedloop.ranking import (
     SUPPORTED_VARIANTS, AUDITED_ADMISSION, VARIANT_CONTRACT, REQUIRED_CONFIG, TRANSIENT_CONFIG,
     parse_context, context_key, admit_sources, embedding_candidates, merge_look_scores,
     share_vector, face_overlap, embedding_similarity, mean_seed_vectors, similar_components,
-    seed_query, cosine, weights_from_profiles, relevance, category_shares, dominant_category,
+    seed_query, cosine, norm, cosine_normed, weights_from_profiles, relevance, category_shares, dominant_category,
     score_components, affinity_scale, select, ordered_evidence, interleave_kinds, rank,
     audited_admission, fingerprint_groups, rank_page, page_items, compare_admission,
     shared_hard_eligibility,
@@ -35,9 +35,12 @@ from feedloop.catalog import CatalogMissing, read_catalog, ranking_identity, fin
 from feedloop.tuning import Tuner, TUNER_REGISTRY, KNOB_DEFAULTS, decide, session_means, entropy
 from feedloop.serving import (
     feed_request, feed_intent, feed_eligibility, build_feed, serve_feed, continue_cursor, view_request,
-    build_fatigue, build_scorecard,
+    build_fatigue, build_scorecard, STAGE_TIMINGS, RANKER_STAGES, stage_add, stage_total, staged, stage_line,
 )
 from feedloop.discovery import Sources, search, similar, rerank_query_bands, fuse, search_windows
-from feedloop.engine import Engine, initialize_stores, DEFAULT_CONFIG, DEFAULT_ATTRIBUTION
+from feedloop.engine import (
+    Engine, initialize_stores, DEFAULT_CONFIG, DEFAULT_ATTRIBUTION, WINDOWS_MEMO_MAX, fallback_ids, random_control,
+    best_windows,
+)
 
 __all__ = [name for name in dir() if not name.startswith("_") and name not in ("taste", "ranking", "ledger", "slots", "profiles", "catalog", "tuning", "serving", "discovery", "engine")]

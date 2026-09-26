@@ -273,8 +273,8 @@ def cosine(a, b, *, contributions=None):
     dot = sum(value for _, value in terms) if terms is not None else sum(v * large.get(k, 0.0) for k, v in small.items())
     if dot <= 0:
         return 0.0
-    na = math.sqrt(sum(v * v for v in a.values()))
-    nb = math.sqrt(sum(v * v for v in b.values()))
+    na = norm(a)
+    nb = norm(b)
     if contributions is not None and na and nb:
         contributions.extend({"tag_id": tag, "contribution": value / (na * nb)} for tag, value in terms if value)
     return dot / (na * nb) if na and nb else 0.0
@@ -376,19 +376,40 @@ def affinity_scale(delta, weight):
     return 1.0 + max(-0.15, min(0.15, weight * delta)) if delta is not None and weight > 0 else 1.0
 
 
+def norm(vector):
+    return math.sqrt(sum(v * v for v in vector.values()))
+
+
+def cosine_normed(a, b, na, nb):
+    """cosine(a, b) given norm(a) and norm(b); the same operations in the same order, minus the two reductions."""
+    if not a or not b:
+        return 0.0
+    small, large = (a, b) if len(a) <= len(b) else (b, a)
+    dot = sum(v * large.get(k, 0.0) for k, v in small.items())
+    if dot <= 0:
+        return 0.0
+    return dot / (na * nb) if na and nb else 0.0
+
+
 def select(scored, *, want, diversity, calibration, target_shares, details=None):
-    """Incremental MMR; strict comparisons preserve input tie order."""
+    """Incremental MMR; strict comparisons preserve input tie order.
+
+    2026-09-16: each candidate's norm is reduced once per call, not once per
+    pairwise comparison (the norm reductions were most of a 525k-comparison
+    fresh ranking). Bit-identical to cosine() per comparison.
+    """
     chosen = []
-    last_vector = {}
+    last_vector, last_norm = {}, 0.0
     counts = defaultdict(int)
     pool = scored[:]
+    norms = [norm(vec) for _rel, _sid, vec, _cat in pool]
     max_sims = [0.0] * len(pool)
     scale = abs(scored[0][0] if scored else 1.0) or 1.0
     while pool and len(chosen) < want:
         best_idx, best_val, best_trace = 0, -1e18, None
         for idx, (rel, sid, vec, cat) in enumerate(pool):
             if chosen:
-                sim = cosine(vec, last_vector)
+                sim = cosine_normed(vec, last_vector, norms[idx], last_norm)
                 if sim > max_sims[idx]:
                     max_sims[idx] = sim
             sim = max_sims[idx]
@@ -403,6 +424,7 @@ def select(scored, *, want, diversity, calibration, target_shares, details=None)
                                   "category_deficit": deficit, "calibration_bonus": calibration * deficit,
                                   "value": val, "ranked_position": len(chosen)}
         rel, sid, vec, cat = pool.pop(best_idx)
+        last_norm = norms.pop(best_idx)
         max_sims.pop(best_idx)
         if details is not None:
             details.setdefault(sid, {})["selection"] = best_trace
