@@ -251,7 +251,9 @@ class Engine:
         return rows, catalog_rows, feature_rows, model_revisions
 
     # ------------------------------------------------------------------ feed
-    def feed(self, request):
+    def feed(self, request, *, record_delivery=True):
+        """Rank and deliver one feed page. record_delivery=False returns the same page with its
+        request identity but writes nothing: no served rows in the ledger, no tuner tick."""
         payload = serving.feed_request(request, kinds=self.kinds)
         if payload.get("status") == "error":
             return payload
@@ -288,6 +290,12 @@ class Engine:
             return {"items": [], "profile": {}, "status": "unavailable", "error": "recommender unavailable", "error_detail": detail}
         serving.stage_add("ranker", time.time() - started)
         result = serving.build_feed(ranked, names=self.tag_names(), offset=payload["offset"], kinds=self.kinds)
+        if not record_delivery:
+            for item in result.get("items", []):
+                item["request_id"] = payload["request_id"]
+                item["served_item_id"] = None
+            return {**result, "request_id": payload["request_id"], "client_request_id": payload["client_request_id"],
+                    "session_id": payload["session_id"], "delivery_recorded": False}
         if result.get("items") and result.get("status") in ("ok", "partial"):
             with serving.staged("delivery"):
                 result = serving.serve_feed(result, payload, ledger_path=self.ledger_path, resolve_eligibility=self.resolve_eligibility,

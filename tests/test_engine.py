@@ -275,3 +275,30 @@ def test_qualified_view_lowers_the_history_multiplier_by_the_impression_discount
     # every other unwatched item keeps its multiplier (watched items carry a clock-dependent cooldown, not fatigue)
     unchanged = {key: value for key, value in after.items() if key != ("video", shown["id"]) and value is not None and key not in signals.rows}
     assert unchanged and all(before[key] == value for key, value in unchanged.items())
+
+
+def test_feed_without_recording_delivery_writes_nothing(tmp_path, clock, monkeypatch):
+    import os
+    import sqlite3
+    now, fake = clock
+    now[0] = 90.0
+    eng, _signals, _spaces = make_engine(tmp_path, fake)
+    now[0] = 100.0
+
+    def counts(path):
+        with sqlite3.connect("file:" + path + "?mode=ro", uri=True) as conn:
+            tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+            return {table: conn.execute('SELECT COUNT(*) FROM "' + table + '"').fetchone()[0] for table in tables}
+
+    stores = (eng.ledger_path, eng.tuner_path)
+    before = [(os.stat(path).st_mtime_ns, counts(path)) for path in stores]
+    with monkeypatch.context() as patch:
+        patch.setattr(engine_module.serving, "serve_feed", lambda *a, **k: pytest.fail("serve_feed reached"))
+        patch.setattr(eng.tuner, "maybe_tick", lambda: pytest.fail("tuner tick reached"))
+        preview = eng.feed(REQUEST, record_delivery=False)
+    assert [(os.stat(path).st_mtime_ns, counts(path)) for path in stores] == before
+    assert preview["status"] == "ok" and preview["delivery_recorded"] is False and preview["request_id"] == "req-1"
+    assert preview["items"] and all(item["served_item_id"] is None for item in preview["items"])
+    delivered = eng.feed(REQUEST)
+    assert delivered["status"] == "ok" and [(i["kind"], i["id"]) for i in preview["items"]] == [(i["kind"], i["id"]) for i in delivered["items"]]
+    assert counts(eng.ledger_path) != before[0][1]
