@@ -12,11 +12,12 @@ const main = document.getElementById("main");
 const note = document.getElementById("rail-note");
 let current = null;
 
+const onSeed = item => { location.hash = "#/similar?" + new URLSearchParams({ kind: item.kind, id: String(item.id) }); };
 const VIEWS = {
-  feed: host => mountFeed(host),
-  home: host => mountHome(host),
-  search: host => mountSearch(host, { onSeed: item => { location.hash = "#/similar?id=" + item.id; } }),
-  similar: host => mountSimilar(host, { onSeed: item => { location.hash = "#/similar?id=" + item.id; } }),
+  feed: host => mountFeed(host, { onSeed }),
+  home: host => mountHome(host, { onSeed }),
+  search: host => mountSearch(host, { onSeed }),
+  similar: host => mountSimilar(host, { onSeed }),
   engine: host => mountEngine(host),
 };
 

@@ -1,8 +1,8 @@
-/* Engine panel: the real scorecard, evidence gates, the current experiment, and the
-   reversible tuner ledger. Missing counts stay missing; demonstration evidence is
+/* Engine dashboard: the taste profile behind the latest Feed page, verdict outcomes, the
+   real scorecard, evidence gates, the current experiment, and the reversible tuner ledger. Missing counts stay missing; demonstration evidence is
    labelled as such; every control is confirmed by the server before the panel refreshes. */
-import { classify, getJSON, post } from "./api.js";
-import { announce, setState, whenTime } from "./state.js";
+import { classify, getJSON, post, readProfile } from "./api.js";
+import { announce, formatTime, setState, whenTime } from "./state.js";
 
 function esc(value) { return value == null ? "Unavailable" : String(value); }
 function num(value, digits = 3) { return typeof value === "number" && Number.isFinite(value) ? new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(value) : "Unavailable"; }
@@ -27,9 +27,63 @@ function evidenceWords(ev) {
   return parts.length ? parts.join(" \u00B7 ") : JSON.stringify(ev);
 }
 
+function panel(title, ...children) {
+  const box = document.createElement("section"); box.className = "panel";
+  const head = document.createElement("h2"); head.textContent = title;
+  box.append(head, ...children);
+  return box;
+}
+
+function tile(value, label, tone) {
+  const box = document.createElement("div"); box.className = "tile" + (tone ? " " + tone : "");
+  const big = document.createElement("b"); big.textContent = value;
+  const small = document.createElement("span"); small.textContent = label;
+  box.append(big, small);
+  return box;
+}
+
+/* The profile is the one the ranker reported with the most recent Feed page in this tab
+   (kept by api.js); the verdict counts are the scorecard's attributed trial outcomes. */
+function summary(sc, record) {
+  const t = sc.tuner || {}, arms = t.arms || {}, capture = sc.capture || {}, auto = sc.automation || {};
+  const p = record && record.profile && typeof record.profile === "object" && Object.keys(record.profile).length ? record.profile : null;
+  const box = document.createElement("div"); box.className = "tiles"; box.setAttribute("data-ai-summary", "1");
+  if (p && p.reason) box.appendChild(tile("None yet", "Taste profile: " + p.reason));
+  else if (p) {
+    box.append(tile(num(p.profile_tags, 0), "Profile tags"), tile(num(p.positive_tags, 0), "Tags pulling up", "is-positive"),
+      tile(num(p.negative_tags, 0), "Tags pushing down", "is-negative"),
+      tile(typeof p.watch_evidence_s === "number" ? formatTime(p.watch_evidence_s) : "Unavailable", "Watch evidence in the profile"));
+  } else box.appendChild(tile("Unavailable", "Taste profile: the latest Feed page in this tab reported none"));
+  const armRows = ["base", "cand"].map(name => arms[name] || (name === "cand" ? arms.candidate : null)).filter(a => a && typeof a === "object");
+  const trials = armRows.reduce((sum, a) => sum + (a.trials || 0), 0), liked = armRows.reduce((sum, a) => sum + (a.successes || 0), 0);
+  box.append(tile(armRows.length ? num(trials, 0) : "Unavailable", "Attributed verdicts"),
+    tile(armRows.length ? num(liked, 0) : "Unavailable", "Liked outcomes", "is-positive"),
+    tile(num(capture.captured_outcomes, 0), "Committed watch outcomes"),
+    tile(auto.enabled === true ? "On" : "Off", "Automatic tuning"));
+  if (record && record.at) box.firstChild.title = "From the Feed page served " + whenTime(record.at);
+  return box;
+}
+
+function armBars(arms) {
+  const box = document.createElement("div");
+  [["Base", arms.base], ["Candidate", arms.cand || arms.candidate]].forEach(([label, arm]) => {
+    if (!arm || typeof arm !== "object") return;
+    const row = document.createElement("div"); row.className = "arm";
+    const name = document.createElement("span"); name.textContent = label;
+    const track = document.createElement("span"); track.className = "arm-track"; track.setAttribute("role", "img");
+    const rate = typeof arm.like_rate === "number" ? arm.like_rate : null;
+    track.setAttribute("aria-label", label + " like rate: " + (rate === null ? "not measured" : Math.round(rate * 100) + "%"));
+    if (rate !== null) { const fill = document.createElement("span"); fill.style.width = Math.round(Math.max(0, Math.min(1, rate)) * 100) + "%"; track.appendChild(fill); }
+    const value = document.createElement("span"); value.className = "num";
+    value.textContent = (rate === null ? "not measured" : Math.round(rate * 100) + "% liked") + " of " + num(arm.trials, 0);
+    row.append(name, track, value); box.appendChild(row);
+  });
+  return box;
+}
+
 function cell(text, cls) { const td = document.createElement("td"); if (cls) td.className = cls; td.textContent = text; return td; }
 
-export function renderScorecard(sc, config) {
+export function renderScorecard(sc, config, profileRecord) {
   const t = sc.tuner || {}, auto = sc.automation || {}, evidence = sc.evidence || {}, capture = sc.capture || {}, gate = sc.gate || {};
   const root = document.createElement("div");
   const captureVerified = capture.verified === true;
@@ -56,7 +110,7 @@ export function renderScorecard(sc, config) {
     demo.textContent = "Demonstration policy: " + config.attribution.window_s + " s attribution window, " + config.attribution.policy_revision;
     reasons.appendChild(document.createTextNode(" ")); reasons.appendChild(demo);
   }
-  root.append(captureBox, promotion, reasons);
+  root.append(summary(sc, profileRecord), panel("Evidence gates", captureBox, promotion, reasons));
 
   const experiment = document.createElement("div");
   experiment.setAttribute("data-ai-experiment", t.knob || "none");
@@ -64,7 +118,8 @@ export function renderScorecard(sc, config) {
   experiment.textContent = t.knob ? "Current experiment: " + t.knob + " base " + esc(t.base) + " versus candidate " + esc(t.candidate) +
     (t.experiment_started ? ", since " + whenTime(t.experiment_started) : "") + "; stalls " + esc(t.stalls) + "; promotion eligible now: " + (t.promotion_eligible === true ? "yes" : "no") + "."
     : "No active experiment: arms are created by an explicit tuner initialization or reset.";
-  root.appendChild(experiment);
+  const experimentPanel = panel("Current experiment", experiment);
+  root.appendChild(experimentPanel);
 
   const knobs = document.createElement("div"); knobs.className = "aid-scroll";
   const table = document.createElement("table"); table.className = "aid-tbl";
@@ -75,10 +130,10 @@ export function renderScorecard(sc, config) {
     tr.append(cell(esc(knob.knob)), cell(num(knob.default), "num"), cell(num(knob.settled), "num"), cell(num(knob.base), "num"), cell(num(knob.candidate), "num"));
     tbody.appendChild(tr);
   });
-  table.appendChild(tbody); knobs.appendChild(table); root.appendChild(knobs);
-  if (t.arms && Object.keys(t.arms).length) { const arms = document.createElement("div"); arms.className = "aid-note"; arms.textContent = "Attributed trials: " + evidenceWords(t.arms); root.appendChild(arms); }
+  table.appendChild(tbody); knobs.appendChild(table); root.appendChild(panel("Knobs", knobs));
+  if (t.arms && Object.keys(t.arms).length) { const arms = document.createElement("div"); arms.className = "aid-note"; arms.textContent = "Attributed trials: " + evidenceWords(t.arms); experimentPanel.append(armBars(t.arms), arms); }
 
-  const ledgerHead = document.createElement("h3"); ledgerHead.textContent = "Tuner ledger"; root.appendChild(ledgerHead);
+  const ledgerPanel = panel("Tuner ledger"); root.appendChild(ledgerPanel);
   if ((t.ledger || []).length) {
     const scroll = document.createElement("div"); scroll.className = "aid-scroll";
     const ledger = document.createElement("table"); ledger.className = "aid-tbl"; ledger.setAttribute("data-ai-ledger", "1");
@@ -96,16 +151,16 @@ export function renderScorecard(sc, config) {
       if (l.status === "applied") { const undo = document.createElement("button"); undo.type = "button"; undo.className = "aid-revert"; undo.setAttribute("data-id", String(l.id)); undo.textContent = "Undo move"; action.appendChild(undo); }
       tr.appendChild(action); rows.appendChild(tr);
     });
-    ledger.appendChild(rows); scroll.appendChild(ledger); root.appendChild(scroll);
+    ledger.appendChild(rows); scroll.appendChild(ledger); ledgerPanel.appendChild(scroll);
   } else {
     const none = document.createElement("div"); none.className = "aid-note"; none.setAttribute("data-ai-ledger-empty", "1");
-    none.textContent = "No moves yet. Every change the tuner makes will be listed here with its evidence, undoable."; root.appendChild(none);
+    none.textContent = "No moves yet. Every change the tuner makes will be listed here with its evidence, undoable."; ledgerPanel.appendChild(none);
   }
-  const controls = document.createElement("div"); controls.style.marginTop = "12px";
+  const controls = document.createElement("div"); controls.className = "aid-controls";
   const reset = document.createElement("button"); reset.type = "button"; reset.id = "aid-tuner-reset"; reset.textContent = "Reset knobs to standard"; controls.appendChild(reset);
-  const tick = document.createElement("button"); tick.type = "button"; tick.id = "aid-tick"; tick.style.marginLeft = "8px"; tick.textContent = "Run attribution and evaluation now"; controls.appendChild(tick);
-  root.appendChild(controls);
-  const note = document.createElement("div"); note.className = "aid-note"; note.textContent = "Knob values are not enjoyment probabilities. Ledger rows are retained, never rewritten."; root.appendChild(note);
+  const tick = document.createElement("button"); tick.type = "button"; tick.id = "aid-tick"; tick.textContent = "Run attribution and evaluation now"; controls.appendChild(tick);
+  ledgerPanel.appendChild(controls);
+  const note = document.createElement("div"); note.className = "aid-note"; note.textContent = "Knob values are not enjoyment probabilities. Ledger rows are retained, never rewritten."; ledgerPanel.appendChild(note);
   return root;
 }
 
@@ -113,7 +168,7 @@ export function mountEngine(host) {
   const view = document.createElement("div");
   view.className = "view";
   view.setAttribute("aria-label", "Engine");
-  view.innerHTML = '<div class="view-head"><h1>Engine</h1><p>What the engine has measured, what it is testing, and every knob move it has made.</p></div>' +
+  view.innerHTML = '<div class="view-head"><h1>Engine</h1><p>Your taste profile, what the engine has measured, what it is testing, and every knob move it has made.</p></div>' +
     '<div id="aid-tuning-body" class="engine-section" aria-live="polite"></div>';
   host.appendChild(view);
   const body = view.querySelector("#aid-tuning-body");
@@ -143,7 +198,7 @@ export function mountEngine(host) {
     Promise.all([getJSON("scorecard"), configPromise]).then(([sc]) => {
       if (disposed || original !== view.querySelector("#aid-tuning-body")) return;
       body.textContent = "";
-      body.appendChild(renderScorecard(sc, config));
+      body.appendChild(renderScorecard(sc, config, readProfile()));
       body.querySelectorAll(".aid-revert").forEach(a => a.addEventListener("click", e => { e.preventDefault(); change("tuner/revert?ledger_id=" + a.getAttribute("data-id")); }));
       body.querySelector("#aid-tuner-reset").addEventListener("click", () => change("tuner/reset"));
       body.querySelector("#aid-tick").addEventListener("click", () => change("tick"));

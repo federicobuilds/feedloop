@@ -6,11 +6,11 @@ import { building, partial, setState } from "./state.js";
 import { gridCard } from "./cards.js";
 import { observeView } from "./watch.js";
 
-export function mountHome(host) {
+export function mountHome(host, { onSeed } = {}) {
   const view = document.createElement("div");
   view.className = "view";
   view.setAttribute("aria-label", "Home");
-  view.innerHTML = '<div class="view-head"><h1>Home</h1><p>Shelves grouped by the category the ranker recorded for each pick.</p></div>';
+  view.innerHTML = '<div class="view-head"><h1>Home</h1><p>Your picks, grouped by the category the ranker recorded for each one. Hover to preview, click to play.</p></div>';
   const status = document.createElement("div"); status.setAttribute("data-ai-home-status", "1");
   const body = document.createElement("div"); body.setAttribute("data-ai-home-body", "1");
   const more = document.createElement("div"); more.className = "load-more";
@@ -25,13 +25,25 @@ export function mountHome(host) {
     building(status, name === "loading");
   }
 
+  /* A shelf is a horizontal row with paging arrows; the first shelf is the lead and
+     shows larger cards. */
   function shelf(category) {
-    let section = body.querySelector('[data-ai-shelf="' + category + '"]');
+    let section = body.querySelector('[data-ai-shelf="' + CSS.escape(category) + '"]');
     if (!section) {
       section = document.createElement("section"); section.className = "shelf"; section.setAttribute("data-ai-shelf", category);
-      const head = document.createElement("h2"); head.textContent = category; const count = document.createElement("small"); head.appendChild(count);
-      const grid = document.createElement("div"); grid.className = "grid";
-      section.append(head, grid); body.appendChild(section);
+      if (!body.querySelector(".shelf")) section.classList.add("is-lead");
+      const head = document.createElement("div"); head.className = "shelf-head";
+      const title = document.createElement("h2"); title.textContent = category; const count = document.createElement("small");
+      head.append(title, count);
+      const holder = document.createElement("div"); holder.className = "shelf-holder";
+      const row = document.createElement("div"); row.className = "shelf-row"; row.setAttribute("role", "list"); row.setAttribute("aria-label", category);
+      holder.appendChild(row);
+      [["prev", "\u2039", -1, "Scroll " + category + " left"], ["next", "\u203A", 1, "Scroll " + category + " right"]].forEach(([cls, glyph, direction, label]) => {
+        const arrow = document.createElement("button"); arrow.type = "button"; arrow.className = "shelf-arrow " + cls; arrow.textContent = glyph; arrow.setAttribute("aria-label", label);
+        arrow.onclick = () => row.scrollBy({ left: direction * row.clientWidth * 0.85, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+        holder.appendChild(arrow);
+      });
+      section.append(head, holder); body.appendChild(section);
     }
     return section;
   }
@@ -41,8 +53,9 @@ export function mountHome(host) {
       const key = itemKey(item);
       if (state.used[key]) return;
       const section = shelf(item.category || item.kind);
-      const card = gridCard(item);
-      section.querySelector(".grid").appendChild(card);
+      const card = gridCard(item, { seedAction: onSeed && item.kind === "video" ? onSeed : null });
+      card.setAttribute("role", "listitem");
+      section.querySelector(".shelf-row").appendChild(card);
       state.used[key] = card;
       const observer = observeView(card, item, state.count++, "home");
       if (observer) state.observers.push(observer);

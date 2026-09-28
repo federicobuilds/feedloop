@@ -17,15 +17,17 @@ feedloop demo ./my-media --fixture-sidecars
 
 `demo` prints two addresses. Open the second one, `http://127.0.0.1:8765/#key=...`. The fragment carries the key that mutations (deliveries, views, watch batches, ratings, tuner controls) need. Reads work without it.
 
-## What the demo shows
+## The interface
 
-`demo` scans the folder, gives each file a stable id, reads an optional `<file>.json` sidecar, and serves on http://127.0.0.1:8765/.
+`demo` scans the folder, gives each file a stable id, reads an optional `<file>.json` sidecar, and serves on http://127.0.0.1:8765/. The interface is plain HTML, one stylesheet and a few ES modules under `web/`, served by feedloop's own server. It has no build step, loads nothing from the network, and works offline. It calls only the server's public routes (`/api/feed`, `/api/view`, `/api/watch`, `/api/feedback`, `/api/search`, `/api/similar`, `/api/scorecard`, `/api/config`, the tuner controls) and the media under `/media/`.
 
-- Feed: a scroll-snap column of cards. Each card explains its rank in words; an absent signal reads "not measured", never zero.
-- Home: shelves with Load more.
-- Search: text search over timed window rows. With fixture sidecars it works on videos; an item without segments reports no-feature.
-- Similar: more like one video, from tag shares blended with mean-vector similarity.
-- Engine: the scorecard, the running experiment and the reversible tuner ledger. The demo uses a five second attribution window and a fifteen second tick, so a watch shows up here within a minute.
+- Feed: one full-height item at a time, with a black stage for the player and a side panel. A video opens at its matching moment. The panel shows the title, a "Why" line in words, duration, score and category, rating buttons, Next and More like this, and a "Why this item" disclosure with signal bars. An absent signal reads "not measured", never zero. Move with the arrow keys or J and K. Space plays or pauses. A video that scrolls out of view pauses.
+- Home: horizontal shelves, one per category the ranker recorded, with Load more. Hovering a card plays a muted preview after a short delay. Clicking it turns the card into the player. Only that player counts as watching; the preview does not.
+- Search: describe a look in words. Start with `sound:` to search the sound space, or with `both:` to search look and sound together. The buttons under the box insert these prefixes, and the mode menu follows whatever prefix you type. With fixture sidecars search works on videos; an item without segments reports no-feature.
+- Similar: more like one video, from tag shares blended with mean-vector similarity. Every video card has a More like this button.
+- Engine: the dashboard. Tiles show the taste profile the ranker reported with the latest Feed page in the tab (profile tags, tags pulling up and down, watch evidence), attributed verdicts and liked outcomes, committed watch outcomes and whether automatic tuning is on. Below them are the evidence gates, the running experiment with a like-rate bar for each arm, the knobs, and the reversible tuner ledger. The demo uses a five second attribution window and a fifteen second tick, so a watch shows up here within a minute.
+
+The interface is dark, with neutral surfaces so the media carries the colour. Motion is short and switches off under `prefers-reduced-motion`, and that includes the hover previews.
 
 Stop the server with Ctrl-C. State lives in `<folder>/.feedloop` (`source.sqlite`, `ledger.sqlite`, `tuner.sqlite`, `spaces/`) unless you pass `--state DIR`. To serve that state again with the production policy (one hour window, six hour trial ripening), run `feedloop serve ./my-media`. `serve` never creates stores unless you pass `--init`.
 

@@ -84,6 +84,9 @@ export function deliverFeed(options) {
       if (data.session_id && data.session_id !== payload.session_id) {
         const error = new Error("Delivery session mismatch"); error.state = "error"; throw error;
       }
+      if (data.profile && typeof data.profile === "object" && payload.surface === "feed") {
+        sessionStorage.setItem(PROFILE_KEY, JSON.stringify({ profile: data.profile, at: Date.now() / 1000 }));
+      }
       return Object.assign({}, data, { session_id: payload.session_id });
     }).catch(error => {
       if (payload.session_id === session()) error.retryDelivery = send;
@@ -91,6 +94,12 @@ export function deliverFeed(options) {
     });
   }
   return send();
+}
+
+/* The ranker's profile summary from the latest Feed page in this tab, for the dashboard. */
+const PROFILE_KEY = "feedloop-profile";
+export function readProfile() {
+  try { return JSON.parse(sessionStorage.getItem(PROFILE_KEY) || "null"); } catch (error) { return null; }
 }
 
 export function itemKey(item) { return item.kind + ":" + item.id; }

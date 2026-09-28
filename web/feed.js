@@ -6,10 +6,10 @@ import { deliverFeed, isStaleCursor, itemKey } from "./api.js";
 import { building, partial, setState } from "./state.js";
 import { explanation } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
-import { media, metaLine } from "./cards.js";
+import { media, metaLine, whyText } from "./cards.js";
 import { observeView } from "./watch.js";
 
-export function mountFeed(host) {
+export function mountFeed(host, { onSeed } = {}) {
   const col = document.createElement("div");
   col.className = "feed-col";
   col.setAttribute("aria-label", "Feed");
@@ -25,6 +25,17 @@ export function mountFeed(host) {
     building(row, name === "loading");
   }
 
+  /* one observer for the column: a video that scrolls out of view is paused, never left playing */
+  const offscreen = new IntersectionObserver(entries => entries.forEach(entry => {
+    if (entry.intersectionRatio < 0.5) entry.target.querySelectorAll("video").forEach(video => video.pause());
+  }), { root: col, threshold: [0, 0.5] });
+
+  function move(index) {
+    const cells = col.querySelectorAll("[data-idx]");
+    if (index < 0) return;
+    if (index < cells.length) cells[index].focus(); else fetchMore();
+  }
+
   function render(fresh) {
     const row = col.querySelector(":scope > [data-ai-state]");
     fresh.forEach(item => {
@@ -37,15 +48,26 @@ export function mountFeed(host) {
       cell.setAttribute("data-ai-key", itemKey(item));
       cell.setAttribute("aria-label", (item.title || "Item " + item.id) + " (" + itemKey(item) + ")");
       cell.tabIndex = 0;
-      const mediaBox = media(item, { autoplay: false });
+      const mediaBox = media(item);
       mediaBox.className = "feed-media";
       const side = document.createElement("div");
       side.className = "card-side";
+      const position = document.createElement("div"); position.className = "feed-pos"; position.textContent = "#" + (index + 1);
       const title = document.createElement("h2"); title.className = "card-title"; title.textContent = item.title || ("Item " + item.id);
-      const reason = document.createElement("p"); reason.className = "card-reason"; reason.textContent = item.reason || "Serving explanation unavailable";
-      side.append(title, reason, metaLine(item), feedbackControls(item), explanation(item));
+      const reason = document.createElement("p"); reason.className = "card-reason why"; reason.textContent = whyText(item);
+      const actions = document.createElement("div"); actions.className = "feed-actions";
+      const next = document.createElement("button"); next.type = "button"; next.className = "primary"; next.textContent = "Next \u2193"; next.onclick = () => move(index + 1);
+      actions.appendChild(next);
+      if (onSeed && item.kind === "video") {
+        const similar = document.createElement("button"); similar.type = "button"; similar.textContent = "More like this"; similar.onclick = () => onSeed(item);
+        actions.appendChild(similar);
+      }
+      const hint = document.createElement("p"); hint.className = "feed-hint";
+      hint.innerHTML = "<kbd>\u2191</kbd> <kbd>\u2193</kbd> or <kbd>K</kbd> <kbd>J</kbd> to move, <kbd>Space</kbd> to play or pause";
+      side.append(position, title, reason, metaLine(item), feedbackControls(item), actions, explanation(item), hint);
       cell.append(mediaBox, side);
       if (row) col.insertBefore(cell, row); else col.appendChild(cell);
+      offscreen.observe(cell);
       const observer = observeView(cell, item, index, "feed");
       if (observer) state.observers.push(observer);
     });
@@ -91,14 +113,16 @@ export function mountFeed(host) {
     if (col.scrollTop + col.clientHeight >= col.scrollHeight - col.clientHeight / 2) fetchMore();
   });
   col.addEventListener("keydown", event => {
-    const cells = col.querySelectorAll("[data-idx]");
     const current = document.activeElement.closest && document.activeElement.closest("[data-idx]");
     const index = current ? Number(current.getAttribute("data-idx")) : -1;
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      if (index + 1 < cells.length) cells[index + 1].focus(); else fetchMore();
-    } else if (event.key === "ArrowUp" && index > 0) { event.preventDefault(); cells[index - 1].focus(); }
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    if (key === "ArrowDown" || key === "j") { event.preventDefault(); move(index + 1); }
+    else if ((key === "ArrowUp" || key === "k") && index > 0) { event.preventDefault(); move(index - 1); }
+    else if (key === " " && current && document.activeElement === current) {
+      const video = current.querySelector("video");
+      if (video) { event.preventDefault(); if (video.paused) video.play().catch(() => {}); else video.pause(); }
+    }
   });
   fetchMore();
-  return { dispose() { state.generation++; feedState(null); state.observers.forEach(o => o.disconnect()); }, state, fetchMore };
+  return { dispose() { state.generation++; feedState(null); offscreen.disconnect(); state.observers.forEach(o => o.disconnect()); }, state, fetchMore };
 }
