@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import random
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -391,25 +392,114 @@ def cosine_normed(a, b, na, nb):
     return dot / (na * nb) if na and nb else 0.0
 
 
+# CPython 3.12 made sum() of floats compensated (Neumaier); the batch reproduces the running interpreter's sum
+_NEUMAIER_SUM = sys.version_info >= (3, 12)
+
+
+def _ordered_sums(terms):
+    """sum() of each row's terms, left to right, as the running interpreter computes it."""
+    total = np.zeros(len(terms))
+    if not _NEUMAIER_SUM:
+        for x in terms.T:
+            total = total + x
+        return total
+    comp = np.zeros(len(terms))
+    for x in terms.T:
+        t = total + x
+        comp += np.where(np.abs(total) >= np.abs(x), (total - t) + x, (x - t) + total)
+        total = t
+    return np.where((comp != 0) & np.isfinite(comp), total + comp, total)
+
+
+def _packed(products):
+    """Each row's nonzero products, in order, packed to the left."""
+    mask = products != 0
+    packed = np.zeros((len(products), int(mask.sum(axis=1).max(initial=0))))
+    rows, _cols = np.nonzero(mask)
+    packed[rows, (np.cumsum(mask, axis=1) - 1)[mask]] = products[mask]
+    return packed
+
+
+class _CosineBatch:
+    """cosine_normed over one candidate list, many pairs per call, bit-identical per pair.
+
+    The scalar dot sums v * large.get(k, 0.0) over the smaller vector's keys in its order. With
+    finite values a zero product leaves that sum (plain or compensated) unchanged, so only the
+    nonzero products are summed, column by column in the same order. Rows holding a non-float
+    or non-finite value keep the scalar function."""
+
+    def __init__(self, vectors):
+        self.vectors, self.norms = vectors, None
+        keys = {}
+        rows = [[(keys.setdefault(k, len(keys)), v) for k, v in vec.items()] for vec in vectors]
+        self.lengths = np.array([len(row) for row in rows], dtype=np.int64)
+        width = int(self.lengths.max(initial=0))
+        self.index = np.zeros((len(rows), width), dtype=np.int64)
+        self.values = np.zeros((len(rows), width))
+        self.dense = np.zeros((len(rows), len(keys)))
+        self.scalar = np.zeros(len(rows), dtype=bool)
+        for i, row in enumerate(rows):
+            if not all(type(v) is float and math.isfinite(v) for _k, v in row):
+                self.scalar[i] = True
+            elif row:
+                idx, vals = zip(*row)
+                self.index[i, :len(row)] = idx
+                self.values[i, :len(row)] = vals
+                self.dense[i, list(idx)] = vals
+
+    def similarities(self, rows, last, norms, last_norm):
+        """[cosine_normed(vectors[i], vectors[last], norms[i], last_norm) for i in rows]."""
+        if self.norms is None:
+            self.norms = np.array(norms, dtype=float)
+        width = int(self.lengths[last])
+        sims = np.zeros(len(rows))
+        if width == 0:
+            return sims.tolist()
+        scalar = np.ones(len(rows), dtype=bool) if self.scalar[last] else self.scalar[rows]
+        dots = np.zeros(len(rows))
+        with np.errstate(all="ignore"):
+            small = (self.lengths[rows] <= width) & ~scalar
+            if small.any():
+                picked = rows[small]
+                # a smaller row has at most `width` keys, so only the first `width` columns hold any
+                dots[small] = _ordered_sums(_packed(self.values[picked, :width] * self.dense[last][self.index[picked, :width]]))
+            large = (self.lengths[rows] > width) & ~scalar
+            if large.any():
+                keys = self.index[last, :width]
+                dots[large] = _ordered_sums(_packed(self.values[last, :width] * self.dense[np.ix_(rows[large], keys)]))
+            na = self.norms[rows]
+            sims = np.where(dots <= 0, 0.0, np.where((na != 0) & (last_norm != 0), dots / (na * last_norm), 0.0)).tolist()
+        for pos in np.flatnonzero(scalar).tolist():
+            i = int(rows[pos])
+            sims[pos] = cosine_normed(self.vectors[i], self.vectors[last], norms[i], last_norm)
+        return sims
+
+
 def select(scored, *, want, diversity, calibration, target_shares, details=None):
     """Incremental MMR; strict comparisons preserve input tie order.
 
     2026-09-16: each candidate's norm is reduced once per call, not once per
     pairwise comparison (the norm reductions were most of a 525k-comparison
     fresh ranking). Bit-identical to cosine() per comparison.
+    2026-09-28: each step's similarities to the last pick run as one numpy batch
+    (FEEDLOOP-PERF-2: the per-pair generator was about 25 s of a warm feed);
+    bit-identical to cosine_normed() per pair.
     """
     chosen = []
-    last_vector, last_norm = {}, 0.0
+    last, last_norm = None, 0.0
     counts = defaultdict(int)
     pool = scored[:]
     norms = [norm(vec) for _rel, _sid, vec, _cat in pool]
+    batch = _CosineBatch([vec for _rel, _sid, vec, _cat in pool])
+    alive = list(range(len(pool)))
     max_sims = [0.0] * len(pool)
     scale = abs(scored[0][0] if scored else 1.0) or 1.0
     while pool and len(chosen) < want:
         best_idx, best_val, best_trace = 0, -1e18, None
+        sims = batch.similarities(np.array(alive, dtype=np.int64), last, norms, last_norm) if chosen else None
         for idx, (rel, sid, vec, cat) in enumerate(pool):
             if chosen:
-                sim = cosine_normed(vec, last_vector, norms[idx], last_norm)
+                sim = sims[idx]
                 if sim > max_sims[idx]:
                     max_sims[idx] = sim
             sim = max_sims[idx]
@@ -424,12 +514,12 @@ def select(scored, *, want, diversity, calibration, target_shares, details=None)
                                   "category_deficit": deficit, "calibration_bonus": calibration * deficit,
                                   "value": val, "ranked_position": len(chosen)}
         rel, sid, vec, cat = pool.pop(best_idx)
-        last_norm = norms.pop(best_idx)
+        last = alive.pop(best_idx)
+        last_norm = norms[last]
         max_sims.pop(best_idx)
         if details is not None:
             details.setdefault(sid, {})["selection"] = best_trace
         chosen.append(sid)
-        last_vector = dict(vec)
         counts[cat] += 1
     return chosen
 

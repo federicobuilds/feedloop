@@ -1047,14 +1047,31 @@ def _unavailable(code):
             "promotion_reasons": ["watch_capture_unavailable"]}
 
 
+_DECODED = {}
+
+
+def _decoded(db_path, token):
+    """The decoded request and event JSON of one ledger, kept across reads while its generation
+    (taken before the read) is unchanged; any committed write starts a fresh memo. A hit also needs
+    the stored JSON text to equal the row's, so a write racing the token never serves a stale value."""
+    key = str(Path(db_path).absolute())
+    memo = _DECODED.get(key)
+    if memo is None or memo[0] != token:
+        memo = _DECODED[key] = (token, {}, {})
+    return memo[1], memo[2]
+
+
 def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
                   experiment_id: str | None = None, include_eligibility_snapshots=False) -> dict[str, Any]:
+    """Read-only. The decoded config, arms and payload objects are shared between reads of one
+    ledger generation, so callers must not mutate them."""
     _number(since_ts)
     _number(through_ts)
     _require(since_ts <= through_ts, "invalid_window")
     _require(type(include_eligibility_snapshots) is bool, "invalid_snapshot_export")
     if experiment_id is not None:
         _text(experiment_id)
+    decoded_requests, decoded_events = _decoded(db_path, generation(db_path))
     try:
         with _connection(db_path) as conn:
             meta = dict(conn.execute("SELECT * FROM rec_metadata").fetchone())
@@ -1090,11 +1107,18 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
             sync_gap = conn.execute("SELECT 1 FROM rec_sync_results WHERE status='quarantined' AND completed_at<=? LIMIT 1",
                                     (through_ts,)).fetchone() is not None
         for req in requests.values():
-            req["config"] = json.loads(req.pop("config_json"))
-            req["arms"] = json.loads(req.pop("arms_json"))
+            raw = (req.pop("config_json"), req.pop("arms_json"))
+            hit = decoded_requests.get(req["request_id"])
+            if hit is None or hit[0] != raw:
+                hit = decoded_requests[req["request_id"]] = (raw, json.loads(raw[0]), json.loads(raw[1]))
+            req["config"], req["arms"] = hit[1], hit[2]
             req["identity_valid"] = _mapping_valid(req, mappings)
         for event in events:
-            event["payload"] = json.loads(event.pop("payload_json"))
+            raw = event.pop("payload_json")
+            hit = decoded_events.get(event["event_id"])
+            if hit is None or hit[0] != raw:
+                hit = decoded_events[event["event_id"]] = (raw, json.loads(raw))
+            event["payload"] = hit[1]
             event["identity_valid"] = _mapping_valid(event, mappings)
         by_id = {r["event_id"]: r for r in events}
         selected = {r["event_id"] for r in events if r["occurred_at"] >= since_ts and
