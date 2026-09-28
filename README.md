@@ -104,6 +104,8 @@ Like, dislike, clear and count engagement are ledgered operations: the engine jo
 
 The tuner runs one experiment at a time, base against candidate for one knob. Once each arm has enough ripened trials across enough sessions, and the difference is significant and does not collapse category diversity, it promotes the winner by itself and rotates to the next knob. Every move is a ledger row that the Engine page can revert; reset restores the standard values.
 
+A host with its own profile and candidate builder passes `prepare_feed` to the Engine. It receives the frozen request context, the resolved configuration, the generation seed, the requested kinds and the pinned catalog, and returns the inputs of `ranking.rank_page`: scored components, image components, target category shares, explanations, admitted, excluded and seed keys, exploration, control and fallback candidates, profile metadata and source counts. The Engine selects with the public `rank_page`, rejects unknown or ineligible keys, fences every committed space and keeps provenance, cursors and delivery. That path is revision `feedloop_feed_prepared/v1` and claims no historical-ranker parity.
+
 A page carries a cursor bound to its ranking generation. When the generation is gone (a restart, changed features, a changed catalog) the server refuses the cursor, and the client restarts once from the top, keeps its cards and drops duplicates. Repeated refusals become a Retry, never a loop.
 
 ## Limits (v0.x)

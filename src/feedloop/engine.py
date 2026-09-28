@@ -25,6 +25,10 @@ from feedloop.slots import DEFAULT_SPACE_ROLES
 from feedloop.taste import DEFAULT_KINDS
 
 RANKING_REVISION = "feedloop_feed/v1"
+# 2026-09-28, v0.4.0: the prepared path has its own implementation revision and claims no
+# historical parity; a host proves reproduction of its own ranker, feedloop does not assert it
+PREPARED_RANKING_REVISION = "feedloop_feed_prepared/v1"
+PREPARED_CONTRACT = {"revision": PREPARED_RANKING_REVISION, "selection": "rank_page/v1", "historical_ranker_reproduction": False}
 VIEW_WINDOW_DAYS = 14
 DEFAULT_CONFIG = dict(
     half_life_days=21.0, min_watch_seconds=20.0, finished_ratio=0.45, abandon_ratio=0.15,
@@ -130,7 +134,8 @@ class Engine:
     def __init__(self, *, catalog, signals, spaces, encoder=None, links=None, annotator=None, ledger_path, tuner_path,
                  kinds=DEFAULT_KINDS, tag_namespace="", config=None, space_roles=DEFAULT_SPACE_ROLES,
                  read_current: Callable | None = None, apply_change: Callable | None = None,
-                 attribution: Mapping[str, Any] | None = None, automatic_tuning=True, clock: Callable[[], float] = time.time):
+                 attribution: Mapping[str, Any] | None = None, automatic_tuning=True, clock: Callable[[], float] = time.time,
+                 prepare_feed: Callable | None = None):
         if (read_current is None) != (apply_change is None):
             raise ValueError("feedback callbacks are supplied together")
         self.catalog, self.signals, self.spaces = catalog, signals, spaces
@@ -143,6 +148,7 @@ class Engine:
         self.read_current, self.apply_change = read_current, apply_change
         self.attribution = {**DEFAULT_ATTRIBUTION, **(attribution or {})}
         self.clock = clock
+        self.prepare_feed = prepare_feed
         self.tuner = tuning.Tuner(self.tuner_path, ledger_path=self.ledger_path, cumulative_facts=self.cumulative_facts,
                                   clock=clock, automatic=automatic_tuning)
         self.sources = discovery.Sources(catalog=catalog, spaces=spaces, signals=signals, encoder=encoder, links=links,
@@ -212,7 +218,9 @@ class Engine:
 
     def _committed_revisions(self, signals, views):
         """The generation tokens a build must see unchanged before it may publish."""
-        spaces = {space: self.spaces.revision(space) for space in sorted(set(self.spaces.spaces()) & set(self.roles.values()))}
+        # a preparer may read any committed space (a paired means space included), so all of them are fenced
+        names = set(self.spaces.spaces()) if self.prepare_feed is not None else set(self.spaces.spaces()) & set(self.roles.values())
+        spaces = {space: self.spaces.revision(space) for space in sorted(names)}
         return {"features": _digest(sorted(spaces.items())) if all(v is not None for v in spaces.values()) else None,
                 "signals": _digest([signals["observed_at"], sorted((f"{k[0]}:{k[1]}", v) for k, v in signals["rows"].items())]),
                 "views": views["revision"]}
@@ -351,17 +359,21 @@ class Engine:
                      "catalog_fingerprints": pin["revision"], "watch": committed["signals"], "item_preferences": committed["signals"],
                      "secondary_preferences": committed["signals"], "views": committed["views"]}
         provenance = json.loads(json.dumps({
-            "ranking_revision": RANKING_REVISION, "config": generating_config, "config_hash": config_hash, "seed": seed,
+            "ranking_revision": RANKING_REVISION if self.prepare_feed is None else PREPARED_RANKING_REVISION, "config": generating_config, "config_hash": config_hash, "seed": seed,
             "revisions": revisions, "captured_at": now,
             "intent": {k: list(v) for k, v in context["intent"].items()},
             "eligible_ids": context["eligibility_spec"] if "snapshot_id" in context["eligibility_spec"] else
             {k: (None if v is None else list(v)) for k, v in context["eligible_ids"].items()},
             "filter_identity": context["filter_identity"], "experiment": experiment}, sort_keys=True, allow_nan=False))
         rank_config = {**config, "experiment": generating_config["experiment"] and {**experiment}}
-        ranked = ranking.rank(inputs, context={**content_context, "limit": len(keys), "offset": 0}, config=rank_config, seed=seed, kinds=self.kinds)
-        # the dominant category the source recorded per served item: the profile weights that
-        # actually ranked this generation over the item's own tag seconds and categories
-        weights = dict(ranked["admission_trace"]["invariants"]["profile"]["weights"])
+        if self.prepare_feed is None:
+            ranked = ranking.rank(inputs, context={**content_context, "limit": len(keys), "offset": 0}, config=rank_config, seed=seed, kinds=self.kinds)
+            # the dominant category the source recorded per served item: the profile weights that
+            # actually ranked this generation over the item's own tag seconds and categories
+            weights = dict(ranked["admission_trace"]["invariants"]["profile"]["weights"])
+        else:
+            ranked = self._prepared_rank(content_context, rank_config, seed, requested_kinds, pin, limit)
+            weights = dict((ranked["profile"] or {}).get("weights") or {})
         categories, vectors = {}, {}
         for feature in feature_rows:
             categories.update({int(t): str(c).lower() for t, c in feature["tag_categories"].items()})
@@ -401,6 +413,61 @@ class Engine:
         response = serving.ranking_response(list(page), total, has_more, offset, kinds=self.kinds)
         response["source_counts"], response["fallback"] = ranked["source_counts"], ranked["fallback"]
         return response
+
+    def _prepared_rank(self, context, config, seed, kinds, pin, page_size):
+        """The host's prepared components through the public rank_page, unchanged.
+
+        prepare_feed(context=, config=, seed=, kinds=, catalog=) returns the rank_page inputs:
+        comps, image_comps, target_shares, explanations, admitted (None or keys), excluded,
+        seeds, explore, control, fallback (keys, or a callable returning keys, called only when
+        the first selection is empty), fallback_reasons, profile, source_counts and optionally
+        windows(keys) -> {key: t}. Every candidate must be a pinned catalog key the request may
+        serve; the seeds must be the request's seeds.
+        """
+        prep = self.prepare_feed(context=copy.deepcopy(context), config=copy.deepcopy(config), seed=seed,
+                                 kinds=tuple(kinds), catalog=copy.deepcopy(pin))
+        intent, allowed = context["intent"], context["eligible_ids"]
+        seeds = [(self.primary, sid) for sid in intent[f"seed_{self.primary}_ids"]]
+        if [tuple(key) for key in prep["seeds"]] != seeds:
+            raise ValueError("preparation_seed_mismatch")
+        forbidden = set(seeds) | {(kind, i) for kind in self.kinds for i in intent.get(f"exclude_{kind}_ids", ())}
+
+        def checked(keys):
+            keys = [tuple(key) for key in keys]
+            for key in keys:
+                if key not in pin["present"]:
+                    raise ValueError("preparation_unknown_key")
+                if (key[0] not in kinds or key in forbidden
+                        or (allowed.get(key[0]) is not None and key[1] not in allowed[key[0]])):
+                    raise ValueError("preparation_ineligible_key")
+            return keys
+
+        checked([row[0] for row in prep["comps"]] + [row[0] for row in prep["image_comps"]] + list(prep["explore"])
+                + list(prep["control"]) + list(prep["admitted"] or ()))
+        excluded = {tuple(key) for key in prep["excluded"]} | {key for key in pin["keys"] if key not in pin["present"]}
+
+        def select(fallback):
+            return ranking.rank_page(prep["comps"], prep["image_comps"], config=config, target_shares=prep["target_shares"], seed=seed,
+                                     allowed=allowed, excluded=excluded, duplicate_groups=pin["groups"], seeds=seeds,
+                                     explanations=prep["explanations"], admitted=prep["admitted"], fallback=fallback,
+                                     fallback_reasons=prep["fallback_reasons"], explore=prep["explore"], control=prep["control"],
+                                     page_size=page_size or 20, offset=0, limit=len(pin["present"]), kinds=self.kinds)
+        fallback = prep["fallback"]
+        page = select([] if callable(fallback) else checked(fallback))
+        if callable(fallback) and not page["all_items"]:
+            page = select(checked(fallback()))
+        chosen = [row["key"] for row in page["all_items"]]
+        times = prep["windows"](chosen) if prep.get("windows") and chosen else {}
+        items = []
+        for row in page["all_items"]:
+            explanation = dict(row["explanation"])
+            if row["key"] in times:
+                explanation["best_t"] = times[row["key"]]
+            items.append({"kind": row["key"][0], "id": row["key"][1], "score": float(row["score"]), "explanation": explanation})
+        source_counts = dict(prep["source_counts"])
+        source_counts["fallback"] = len(items) if page["fallback_active"] else 0
+        return {"items": items, "profile": prep["profile"], "source_counts": source_counts,
+                "fallback": {"active": page["fallback_active"], "reasons": list(prep["fallback_reasons"])}}
 
     # ------------------------------------------------------------- discovery
     def search(self, query, mode="look", *, context=None, offset=0, limit=20):
