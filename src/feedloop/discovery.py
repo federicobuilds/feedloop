@@ -85,15 +85,16 @@ class Sources:
             return {}
         index, matrix = loaded
         wanted = None if keys is None else set(keys)
-        out = {}
-        for row, key in enumerate(index):
-            if wanted is not None and key not in wanted:
-                continue
-            vector = np.asarray(matrix[row], dtype=np.float32)
-            norm = float(np.linalg.norm(vector))
-            if vector.ndim == 1 and np.isfinite(vector).all() and norm > 0:
-                out[key] = vector / norm
-        return out
+        rows = [row for row, key in enumerate(index) if wanted is None or key in wanted]
+        if not rows:
+            return {}
+        batch = np.asarray(matrix, dtype=np.float32)[np.asarray(rows, dtype=np.intp)]
+        # stacked (1,d)@(d,1) products reduce like the per-row float32 dot np.linalg.norm uses,
+        # so each unit vector is bit-identical to normalizing the row on its own
+        norms = np.sqrt(np.matmul(batch[:, None, :], batch[:, :, None])[:, 0, 0])
+        valid = np.isfinite(batch).all(axis=1) & (norms > 0)
+        unit = batch / np.where(valid, norms, np.float32(1))[:, None]
+        return {index[row]: unit[position] for position, row in enumerate(rows) if valid[position]}
 
     def trusted_links(self, keys=None):
         if self.links is None:

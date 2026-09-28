@@ -58,6 +58,7 @@ def read_catalog(source, keys=None, *, kinds=DEFAULT_KINDS):
     result = []
     for kind in kinds:
         ids = None if keys is None else sorted({id_ for k, id_ in keys if k == kind})
+        wanted = None if ids is None else set(ids)
         if ids == []:
             continue
         seen, expected, page, rows = set(), None, 1, []
@@ -73,6 +74,7 @@ def read_catalog(source, keys=None, *, kinds=DEFAULT_KINDS):
                 if ids is None or not reported or any(k != kind for k, _ in reported) or not missing <= set(ids):
                     raise RuntimeError("catalog_enumeration_failed") from None
                 ids = [id_ for id_ in ids if id_ not in missing]
+                wanted = set(ids)
                 seen, expected, page, rows = set(), None, 1, []
                 if not ids:
                     break
@@ -90,7 +92,7 @@ def read_catalog(source, keys=None, *, kinds=DEFAULT_KINDS):
                 if not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] <= 0 or row.get("kind") != kind:
                     raise RuntimeError("catalog_item_invalid")
                 id_, attached = row["id"], row.get("files")
-                if (id_ in seen or (ids is not None and id_ not in ids) or not row.get("updated")
+                if (id_ in seen or (wanted is not None and id_ not in wanted) or not row.get("updated")
                         or not isinstance(attached, list) or any(not isinstance(f, dict) or
                         not isinstance(f.get("fingerprints"), list) for f in attached)):
                     raise RuntimeError("catalog_enumeration_partial")
@@ -108,7 +110,24 @@ def ranking_identity(rows):
     return [{"kind": row["kind"], "id": row["id"], "files": row["files"]} for row in rows]
 
 
-def fingerprint_snapshot(source, keys, *, attempts=3, kinds=DEFAULT_KINDS):
+class SnapshotMemo:
+    """The last pin fingerprint_snapshot derived, reused while the ranking identity is equal.
+
+    Invalidation contract: every call still makes both validated reads; only the derivation
+    (revision digest, duplicate groups, present set) is reused, and only when the agreed
+    identity, keys and kinds equal the memo's. Any item, file or fingerprint change is a
+    different identity and derives a new pin. change_token is not trusted as a fence: the
+    slot contract lets it stay put across changes. The pin returned is shared: read it, never
+    mutate it. clear() drops it (Engine.reset_caches)."""
+
+    def __init__(self):
+        self.entry = None
+
+    def clear(self):
+        self.entry = None
+
+
+def fingerprint_snapshot(source, keys, *, attempts=3, kinds=DEFAULT_KINDS, memo=None):
     """Two consecutive reads of the requested keys that agree on ranking identity.
 
     A read whose items or files differ is retried a bounded number of times;
@@ -118,11 +137,19 @@ def fingerprint_snapshot(source, keys, *, attempts=3, kinds=DEFAULT_KINDS):
     for _ in range(max(1, attempts)):
         current = ranking_identity(read_catalog(source, keys, kinds=kinds))
         if current == previous:
-            return {"revision": digest(current), "groups": fingerprint_groups(current, kinds=kinds),
-                    "present": {(r["kind"], r["id"]) for r in current}, "keys": keys}
+            entry = memo.entry if memo is not None else None
+            if entry is not None and entry[0] == (keys, tuple(kinds)) and entry[1] == current:
+                return entry[2]
+            text = json.dumps(current, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            pin = {"revision": hashlib.sha256(text.encode()).hexdigest(), "groups": fingerprint_groups(current, kinds=kinds),
+                   "present": {(r["kind"], r["id"]) for r in current}, "keys": keys}
+            if memo is not None:
+                # a decoded copy: slots may hand out rows that share file dicts with their own state
+                memo.entry = ((keys, tuple(kinds)), json.loads(text), pin)
+            return pin
         previous = current
     raise RuntimeError("catalog_enumeration_changed")
 
 
 __all__ = ["TRANSPORT_ATTEMPTS", "TRANSPORT_TIMEOUT_S", "PAGE_SIZE", "digest", "CatalogMissing",
-           "read_catalog", "ranking_identity", "fingerprint_snapshot"]
+           "read_catalog", "ranking_identity", "SnapshotMemo", "fingerprint_snapshot"]

@@ -156,6 +156,8 @@ class Engine:
         self.lock = threading.RLock()
         self.reset_generation = 0
         self._cursors: dict[str, dict] = {}
+        self._pin_memo = catalog_module.SnapshotMemo()
+        self._views_memo = None
 
     # ----------------------------------------------------------------- facts
     @property
@@ -204,6 +206,17 @@ class Engine:
         if self.config["impression_discount"] >= 0.999:
             return {"status": "disabled", "events": [], "revision": _digest([])}
         since = max(0.0, now - VIEW_WINDOW_DAYS * 86400.0)
+        # the pre- and post-build reads of one feed share since/now; a read is reused while the
+        # ledger generation, taken before it, is unchanged (any committed write moves it)
+        key = (ledger.generation(self.ledger_path), since, now)
+        memo = self._views_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        views = self._read_views(since, now)
+        self._views_memo = (key, views) if views["status"] == "ok" else None
+        return views
+
+    def _read_views(self, since, now):
         counts = ledger.read_view_counts(self.ledger_path, since_ts=since, through_ts=now)
         if counts["status"] != "ok":
             return {"status": counts["status"], "events": [], "revision": None}
@@ -315,7 +328,7 @@ class Engine:
         if cursor is not None and cursor["offset"] != offset:
             raise ValueError("cursor_offset_mismatch")
         all_keys = [(r["kind"], r["id"]) for r in catalog_module.read_catalog(self.catalog, kinds=self.kinds)]
-        pin = catalog_module.fingerprint_snapshot(self.catalog, all_keys, kinds=self.kinds)
+        pin = catalog_module.fingerprint_snapshot(self.catalog, all_keys, kinds=self.kinds, memo=self._pin_memo)
         keys = sorted(pin["present"])
         signals = self.signals.read()
         observed_at = float(signals["observed_at"])
@@ -401,7 +414,7 @@ class Engine:
                           "duration_s": float(source.get("duration_s") or 0.0), "category": category, "source_rank": position})
         # completed-generation equality: every token read before the build must read the same after it
         completed = self._committed_revisions(self.signals.read(), self._views(now))
-        stable = (catalog_module.fingerprint_snapshot(self.catalog, pin["keys"], kinds=self.kinds) == pin
+        stable = (catalog_module.fingerprint_snapshot(self.catalog, pin["keys"], kinds=self.kinds, memo=self._pin_memo) == pin
                   and self.tuner.stable(resolved) and committed["features"] is not None and views["status"] in ("ok", "disabled")
                   and completed == committed)
         provenance["revision_status"] = "stable" if stable else "unavailable_or_changed"
@@ -556,6 +569,8 @@ class Engine:
         with self.lock:
             self.reset_generation += 1
             self._cursors.clear()
+            self._pin_memo.clear()
+            self._views_memo = None
         self.tuner.invalidate()
 
     # ------------------------------------------------------------ attribution

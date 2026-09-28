@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+import itertools
 import hmac
 import json
 import math
@@ -274,6 +275,29 @@ def _identity(kind, item_id, kinds):
     return kind, _integer(item_id, minimum=1)
 
 
+_WRITES = itertools.count(1)
+_WRITE_SEQUENCE = [0]
+
+
+def generation(db_path) -> tuple:
+    """A token that differs after any committed ledger write: this process's write sequence,
+    SQLite's header change counter, and the stat of the database and its WAL. Read it before
+    a read; a caller may reuse that read while the token stays equal. Reads nothing else."""
+    path = Path(db_path)
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(28)[24:28]
+        db = path.stat()
+    except OSError:
+        return (_WRITE_SEQUENCE[0], None)
+    try:
+        wal = Path(str(path) + "-wal").stat()
+        wal = (wal.st_mtime_ns, wal.st_size, wal.st_ino)
+    except OSError:
+        wal = None
+    return (_WRITE_SEQUENCE[0], header, db.st_mtime_ns, db.st_size, db.st_ino, wal)
+
+
 @contextmanager
 def _connection(db_path, *, write=False, initialize=False):
     conn = None
@@ -290,6 +314,8 @@ def _connection(db_path, *, write=False, initialize=False):
             _require(row is not None and row["schema_version"] == SCHEMA_VERSION, "schema_unavailable")
         yield conn
         conn.commit()
+        if write:
+            _WRITE_SEQUENCE[0] = next(_WRITES)
     except sqlite3.Error:
         raise ContractError("store_unavailable") from None
     finally:
