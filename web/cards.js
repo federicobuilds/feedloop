@@ -1,14 +1,20 @@
 /* Shared card and media rendering. Media is the folder's own file, never a generated
    thumbnail: a video shows the frame at its matching moment through a media fragment.
    A grid card previews muted on hover and becomes the real player on click; only the
-   real player is attached to watch capture, because a hover preview is not watching. */
-import { explanation } from "./explain.js";
+   real player is attached to watch capture, because a hover preview is not watching.
+   Videos get their source only when they come near the viewport; still images open a
+   full-size viewer. */
+import { evidenceStrip, explanation } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
 import { attachPlayer } from "./watch.js";
 import { formatTime } from "./state.js";
+import { icon } from "./icons.js";
 
 const PREVIEW_DELAY_MS = 230;
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+const KINDS = { video: "Video", image: "Image" };
+
+function sentence(text) { const value = String(text).replace(/_/g, " "); return value.charAt(0).toUpperCase() + value.slice(1); }
 
 function durationOf(item) {
   if (typeof item.duration === "number" && item.duration > 0) return item.duration;
@@ -17,11 +23,12 @@ function durationOf(item) {
 }
 
 /* The served matching moment when there is one; otherwise a frame a tenth of the way in,
-   which is only where the still is taken from, never a claim about the item. */
+   which is only where the still is taken from, never a claim about the item. A moment at
+   or past the end of the clip opens at 0. */
 function startOf(item) {
   const moment = item.best_t != null ? item.best_t : item.search && item.search.best_t;
-  if (typeof moment === "number" && moment >= 0) return moment;
   const duration = durationOf(item);
+  if (typeof moment === "number" && moment >= 0) return duration && moment >= duration ? 0 : moment;
   return duration ? Math.round(duration * 10) / 100 : 0;
 }
 
@@ -29,9 +36,61 @@ function titleOf(item) { return item.title || ("Item " + item.id); }
 
 export function whyText(item) {
   if (item.reason) return item.reason;
-  if (item.search) return item.search.best_t != null ? "Matching moment " + formatTime(item.search.best_t) : "Matches your words; position not measured";
+  if (item.search) {
+    const moment = item.search.best_t, duration = durationOf(item);
+    return moment != null && !(duration && moment >= duration) ? "Matching moment " + formatTime(moment) : "Matches your words";
+  }
   if (item.similar) return "Shares tags with the seed";
-  return "Serving explanation unavailable";
+  return "No reason was recorded for this pick.";
+}
+
+export function similarHref(item) {
+  return "#/similar?" + new URLSearchParams({ kind: item.kind, id: String(item.id), title: titleOf(item) });
+}
+
+export function similarLink(item, compact) {
+  const link = document.createElement("a");
+  link.className = "action";
+  link.href = similarHref(item);
+  link.appendChild(icon("similar"));
+  const text = document.createElement("span"); text.textContent = "More like this";
+  if (compact) { text.className = "sr-only"; link.title = "More like this"; }
+  link.appendChild(text);
+  return link;
+}
+
+/* One observer per scroll root assigns a video its source once it is within 600 px. */
+let viewportObserver = null;
+function nearSource(video, url, root) {
+  const load = () => { video.src = url; };
+  if (!("IntersectionObserver" in window)) { load(); return; }
+  let observer = root ? root.__nearObserver : viewportObserver;
+  if (!observer) {
+    observer = new IntersectionObserver(entries => entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      observer.unobserve(entry.target);
+      entry.target.__loadSource();
+    }), { root: root || null, rootMargin: "600px" });
+    if (root) root.__nearObserver = observer; else viewportObserver = observer;
+  }
+  video.__loadSource = load;
+  observer.observe(video);
+}
+
+function openVideo(video, item, root) {
+  video.__start = startOf(item);
+  video.preload = "metadata"; video.playsInline = true;
+  video.addEventListener("loadedmetadata", () => {
+    if (video.__start > 0 && video.__start >= video.duration) { video.__start = 0; video.currentTime = 0; }
+  });
+  nearSource(video, item.media_url + "#t=" + video.__start, root);
+}
+
+function image(item, eager) {
+  const img = document.createElement("img");
+  img.src = item.media_url; img.alt = titleOf(item); img.width = 640; img.height = 360; img.decoding = "async";
+  if (eager) { img.loading = "eager"; img.fetchPriority = "high"; } else img.loading = "lazy";
+  return img;
 }
 
 function placeholder(box) {
@@ -39,103 +98,141 @@ function placeholder(box) {
   return box;
 }
 
-function badge(cls, text) { const span = document.createElement("span"); span.className = "badge " + cls; span.textContent = text; return span; }
-
 /* The Feed player: controls on, attached to watch capture, opening at the matching moment. */
-export function media(item) {
+export function media(item, { root = null, eager = false } = {}) {
   const box = document.createElement("div");
   box.className = "thumb";
   if (!item.media_url) return placeholder(box);
   if (item.kind === "video") {
     const video = document.createElement("video");
-    video.src = item.media_url + "#t=" + startOf(item); video.controls = true; video.preload = "metadata"; video.playsInline = true;
+    video.controls = true;
     video.setAttribute("aria-label", titleOf(item));
+    openVideo(video, item, root);
     attachPlayer(video, item);
     box.appendChild(video);
-  } else {
-    const image = document.createElement("img");
-    image.src = item.media_url; image.alt = titleOf(item); image.loading = "lazy"; image.width = 640; image.height = 360;
-    box.appendChild(image);
-  }
+  } else box.appendChild(image(item, eager));
   return box;
 }
 
-function thumb(item) {
+let viewer = null, viewerOpener = null;
+function openViewer(item, opener) {
+  if (!viewer) {
+    viewer = document.createElement("dialog");
+    viewer.className = "viewer";
+    const close = document.createElement("button");
+    close.type = "button"; close.className = "viewer-close"; close.setAttribute("aria-label", "Close");
+    close.appendChild(icon("close"));
+    close.onclick = () => viewer.close();
+    const picture = document.createElement("img");
+    const caption = document.createElement("p"); caption.className = "viewer-caption";
+    viewer.append(close, picture, caption);
+    viewer.addEventListener("click", event => { if (event.target === viewer) viewer.close(); });
+    viewer.addEventListener("close", () => { if (viewerOpener && viewerOpener.isConnected) viewerOpener.focus(); });
+    document.body.appendChild(viewer);
+  }
+  viewerOpener = opener;
+  const picture = viewer.querySelector("img");
+  picture.src = item.media_url; picture.alt = titleOf(item);
+  viewer.querySelector(".viewer-caption").textContent = titleOf(item);
+  viewer.setAttribute("aria-label", titleOf(item));
+  viewer.showModal();
+}
+
+function durationBadge(box, seconds) {
+  let badge = box.querySelector(".badge");
+  if (!badge) { badge = document.createElement("span"); badge.className = "badge"; box.appendChild(badge); }
+  badge.textContent = formatTime(seconds);
+}
+
+function thumb(item, eager) {
   const box = document.createElement("div");
   box.className = "thumb";
   if (!item.media_url) return placeholder(box);
+  const opener = document.createElement("button");
+  opener.type = "button";
+  opener.className = "thumb-open";
   if (item.kind !== "video") {
-    const image = document.createElement("img");
-    image.src = item.media_url; image.alt = titleOf(item); image.loading = "lazy"; image.width = 640; image.height = 360;
-    box.appendChild(image);
+    box.appendChild(image(item, eager));
+    opener.setAttribute("aria-label", "View " + titleOf(item) + " full size");
+    opener.onclick = () => openViewer(item, opener);
+    box.appendChild(opener);
     return box;
   }
-  const start = startOf(item);
   const video = document.createElement("video");
-  video.src = item.media_url + "#t=" + start; video.preload = "metadata"; video.muted = true; video.playsInline = true; video.tabIndex = -1;
+  video.muted = true; video.tabIndex = -1;
   video.setAttribute("aria-label", titleOf(item));
+  openVideo(video, item, null);
   box.appendChild(video);
   const duration = durationOf(item);
-  if (duration) box.appendChild(badge("duration", formatTime(duration)));
-  box.appendChild(badge("play", "\u25B6 Play"));
-  box.tabIndex = 0; box.setAttribute("role", "button"); box.setAttribute("aria-label", "Play " + titleOf(item));
+  if (duration) durationBadge(box, duration);
+  else video.addEventListener("loadedmetadata", () => { if (Number.isFinite(video.duration)) durationBadge(box, video.duration); }, { once: true });
+  const chip = document.createElement("span"); chip.className = "play-chip"; chip.setAttribute("aria-hidden", "true");
+  chip.append(icon("play"), "Play");
+  opener.appendChild(chip);
+  opener.setAttribute("aria-label", "Play " + titleOf(item));
+  box.appendChild(opener);
   let timer = null, live = false;
   box.addEventListener("mouseenter", () => {
-    if (live || reducedMotion.matches) return;
+    if (live || reducedMotion.matches || !video.getAttribute("src")) return;
     timer = setTimeout(() => { video.loop = true; video.play().catch(() => {}); }, PREVIEW_DELAY_MS);
   });
   box.addEventListener("mouseleave", () => {
     clearTimeout(timer); timer = null;
-    if (!live) { video.pause(); video.currentTime = start; }
+    if (!live) { video.pause(); if (video.readyState) video.currentTime = video.__start; }
   });
-  function play() {
+  opener.onclick = () => {
     if (live) return;
     live = true; clearTimeout(timer);
-    video.pause(); video.loop = false; video.currentTime = start; video.muted = false; video.controls = true; video.tabIndex = 0;
-    box.classList.add("is-live"); box.removeAttribute("role"); box.removeAttribute("tabindex"); box.removeAttribute("aria-label");
+    if (!video.getAttribute("src")) video.__loadSource();
+    video.pause(); video.loop = false; if (video.readyState) video.currentTime = video.__start;
+    video.muted = false; video.controls = true; video.tabIndex = 0;
+    box.classList.add("is-live"); opener.remove();
     attachPlayer(video, item);
     video.focus();
     video.play().catch(() => {});
-  }
-  box.addEventListener("click", play);
-  box.addEventListener("keydown", event => { if (!live && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); play(); } });
+  };
   return box;
 }
 
-const SIDECAR_REASONS = { sidecar_path_too_long: "sidecar not read: file name too long", sidecar_invalid: "sidecar not read: invalid JSON",
-  sidecar_unreadable: "sidecar not read" };
+const SIDECAR_REASONS = { sidecar_path_too_long: "Sidecar not read: file name too long", sidecar_invalid: "Sidecar not read: invalid JSON",
+  sidecar_unreadable: "Sidecar not read" };
 
-export function metaLine(item) {
-  const meta = document.createElement("div");
+/* One quiet line: kind, duration (from the sidecar, else from the player once it knows),
+   category. Still images have no duration. Flags that need attention follow. */
+export function metaLine(item, video) {
+  const meta = document.createElement("p");
   meta.className = "card-meta";
-  const duration = durationOf(item);
-  const bits = [[item.kind], [duration ? formatTime(duration) : "duration not measured"]];
-  if (typeof item.score === "number" && Number.isFinite(item.score)) bits.push(["score " + item.score.toFixed(2), "meta-score"]);
-  if (item.category && item.category !== item.kind) bits.push([item.category]);
-  if (item.sidecar_reason) bits.push([SIDECAR_REASONS[item.sidecar_reason] || "sidecar not read", "meta-flag"]);
-  if (item.explore) bits.push(["exploration", "meta-flag"]);
-  if (item.control) bits.push(["control", "meta-flag"]);
-  bits.forEach(([text, cls]) => { const span = document.createElement("span"); span.textContent = text; if (cls) span.className = cls; meta.appendChild(span); });
+  function part(text, cls) { const span = document.createElement("span"); span.textContent = text; if (cls) span.className = cls; meta.appendChild(span); return span; }
+  const kind = part(KINDS[item.kind] || sentence(item.kind));
+  if (item.kind === "video") {
+    const duration = durationOf(item);
+    if (duration) part(formatTime(duration), "num");
+    else if (video) video.addEventListener("loadedmetadata", () => {
+      if (!Number.isFinite(video.duration)) return;
+      const span = document.createElement("span"); span.className = "num"; span.textContent = formatTime(video.duration); kind.after(span);
+    }, { once: true });
+  }
+  if (item.category && item.category !== item.kind) part(sentence(item.category));
+  if (item.explore) part("Exploration pick");
+  if (item.control) part("Control pick");
+  if (item.sidecar_reason) part(SIDECAR_REASONS[item.sidecar_reason] || "Sidecar not read", "meta-flag");
   return meta;
 }
 
-export function gridCard(item, { withFeedback = true, seedAction = null } = {}) {
+/* Home shelves use h3 under the shelf h2; Search and Similar use h2 under the view h1. */
+export function gridCard(item, { headingLevel = 2, eager = false } = {}) {
   const card = document.createElement("article");
   card.className = "card";
   card.setAttribute("data-ai-home-key", item.kind + ":" + item.id);
-  card.appendChild(thumb(item));
+  const box = thumb(item, eager);
+  card.appendChild(box);
   const body = document.createElement("div");
   body.className = "body";
-  const title = document.createElement("h3"); title.textContent = titleOf(item); title.title = titleOf(item);
+  const title = document.createElement("h" + headingLevel); title.className = "card-heading"; title.textContent = titleOf(item); title.title = titleOf(item);
+  const why = explanation(item);
   const reason = document.createElement("p"); reason.className = "reason"; reason.textContent = whyText(item); reason.title = reason.textContent;
-  body.append(title, reason, metaLine(item));
-  if (seedAction) {
-    const actions = document.createElement("div"); actions.className = "card-actions";
-    const button = document.createElement("button"); button.type = "button"; button.textContent = "More like this"; button.onclick = () => seedAction(item);
-    actions.appendChild(button); body.appendChild(actions);
-  }
-  if (withFeedback) body.appendChild(feedbackControls(item));
-  body.appendChild(explanation(item));
+  const extras = item.kind === "video" ? [similarLink(item, true)] : [];
+  body.append(title, evidenceStrip(item, why), reason, metaLine(item, box.querySelector("video")), feedbackControls(item, { extras, compact: true }), why);
   card.appendChild(body);
   return card;
 }

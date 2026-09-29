@@ -4,17 +4,27 @@
    the automatic restart. Manual Retry discards the dead cursor and re-arms one restart. */
 import { deliverFeed, isStaleCursor, itemKey } from "./api.js";
 import { building, partial, setState } from "./state.js";
-import { explanation } from "./explain.js";
+import { evidenceStrip, explanation } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
-import { media, metaLine, whyText } from "./cards.js";
+import { media, metaLine, similarLink, whyText } from "./cards.js";
 import { observeView } from "./watch.js";
+import { icon } from "./icons.js";
 
-export function mountFeed(host, { onSeed } = {}) {
+/* Shortcuts never take keys meant for a control, the player, or a modified chord. */
+function ownsKeys(target) {
+  return !!(target.closest && target.closest("input, textarea, select, button, video, audio, summary, [contenteditable]:not([contenteditable='false'])"));
+}
+
+export function mountFeed(host) {
+  const view = document.createElement("div");
+  view.className = "feed-view";
+  const heading = document.createElement("h1"); heading.className = "sr-only"; heading.textContent = "Feed";
   const col = document.createElement("div");
   col.className = "feed-col";
   col.setAttribute("aria-label", "Feed");
   col.setAttribute("data-ai-feed", "1");
-  host.appendChild(col);
+  view.append(heading, col);
+  host.appendChild(view);
   const state = { items: [], seen: new Set(), offset: 0, cursor: null, hasMore: true, fetching: false, restarted: false, emptyPages: 0, generation: 0, observers: [] };
 
   function feedState(name, retry) {
@@ -46,25 +56,22 @@ export function mountFeed(host, { onSeed } = {}) {
       cell.className = "feed-cell";
       cell.setAttribute("data-idx", String(index));
       cell.setAttribute("data-ai-key", itemKey(item));
-      cell.setAttribute("aria-label", (item.title || "Item " + item.id) + " (" + itemKey(item) + ")");
+      cell.setAttribute("aria-label", (item.title || "Item " + item.id) + ", pick " + (index + 1));
       cell.tabIndex = 0;
-      const mediaBox = media(item);
+      const mediaBox = media(item, { root: col, eager: index === 0 });
       mediaBox.className = "feed-media";
       const side = document.createElement("div");
       side.className = "card-side";
-      const position = document.createElement("div"); position.className = "feed-pos"; position.textContent = "#" + (index + 1);
       const title = document.createElement("h2"); title.className = "card-title"; title.textContent = item.title || ("Item " + item.id);
-      const reason = document.createElement("p"); reason.className = "card-reason why"; reason.textContent = whyText(item);
-      const actions = document.createElement("div"); actions.className = "feed-actions";
-      const next = document.createElement("button"); next.type = "button"; next.className = "primary"; next.textContent = "Next \u2193"; next.onclick = () => move(index + 1);
-      actions.appendChild(next);
-      if (onSeed && item.kind === "video") {
-        const similar = document.createElement("button"); similar.type = "button"; similar.textContent = "More like this"; similar.onclick = () => onSeed(item);
-        actions.appendChild(similar);
-      }
+      const why = explanation(item);
+      const reason = document.createElement("p"); reason.className = "card-reason"; reason.textContent = whyText(item);
+      const next = document.createElement("button"); next.type = "button"; next.className = "action primary";
+      next.append(icon("next"), "Next"); next.onclick = () => move(index + 1);
+      const extras = [next];
+      if (item.kind === "video") extras.push(similarLink(item, false));
       const hint = document.createElement("p"); hint.className = "feed-hint";
-      hint.innerHTML = "<kbd>\u2191</kbd> <kbd>\u2193</kbd> or <kbd>K</kbd> <kbd>J</kbd> to move, <kbd>Space</kbd> to play or pause";
-      side.append(position, title, reason, metaLine(item), feedbackControls(item), actions, explanation(item), hint);
+      hint.innerHTML = "<kbd>J</kbd> <kbd>K</kbd> or arrows to move, <kbd>Space</kbd> to play, <kbd>L</kbd> <kbd>D</kbd> to rate";
+      side.append(title, evidenceStrip(item, why, { legend: true }), reason, metaLine(item, mediaBox.querySelector("video")), feedbackControls(item, { extras }), why, hint);
       cell.append(mediaBox, side);
       if (row) col.insertBefore(cell, row); else col.appendChild(cell);
       offscreen.observe(cell);
@@ -112,17 +119,19 @@ export function mountFeed(host, { onSeed } = {}) {
   col.addEventListener("scroll", () => {
     if (col.scrollTop + col.clientHeight >= col.scrollHeight - col.clientHeight / 2) fetchMore();
   });
-  col.addEventListener("keydown", event => {
-    const current = document.activeElement.closest && document.activeElement.closest("[data-idx]");
+  view.addEventListener("keydown", event => {
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || ownsKeys(event.target)) return;
+    const current = event.target.closest && event.target.closest("[data-idx]");
     const index = current ? Number(current.getAttribute("data-idx")) : -1;
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     if (key === "ArrowDown" || key === "j") { event.preventDefault(); move(index + 1); }
     else if ((key === "ArrowUp" || key === "k") && index > 0) { event.preventDefault(); move(index - 1); }
-    else if (key === " " && current && document.activeElement === current) {
+    else if ((key === "l" || key === "d") && current) { event.preventDefault(); current.querySelector(key === "l" ? "[data-ai-feedback='like']" : "[data-ai-feedback='dislike']").click(); }
+    else if (key === " " && current) {
       const video = current.querySelector("video");
       if (video) { event.preventDefault(); if (video.paused) video.play().catch(() => {}); else video.pause(); }
     }
   });
   fetchMore();
-  return { dispose() { state.generation++; feedState(null); offscreen.disconnect(); state.observers.forEach(o => o.disconnect()); }, state, fetchMore };
+  return { dispose() { state.generation++; feedState(null); offscreen.disconnect(); if (col.__nearObserver) col.__nearObserver.disconnect(); state.observers.forEach(o => o.disconnect()); }, state, fetchMore };
 }

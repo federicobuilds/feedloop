@@ -57,8 +57,18 @@ export function classify(response, listKey) {
   });
 }
 
-export function getJSON(route, listKey) {
-  return fetch("/api/" + route, { headers: { Accept: "application/json" } }).then(r => classify(r, listKey));
+/* `signal` cancels a superseded request; the caller treats an AbortError as no result. */
+export function getJSON(route, listKey, signal) {
+  return fetch("/api/" + route, { headers: { Accept: "application/json" }, signal }).then(r => classify(r, listKey));
+}
+
+export function isAbort(error) { return !!error && error.name === "AbortError"; }
+
+/* The engine configuration, fetched once per page and shared by the shell and Engine. */
+let configRequest = null;
+export function config() {
+  if (!configRequest) configRequest = getJSON("config").catch(error => { configRequest = null; throw error; });
+  return configRequest;
 }
 
 export function post(route, payload, listKey) {

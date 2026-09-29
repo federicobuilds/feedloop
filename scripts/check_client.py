@@ -190,7 +190,7 @@ def runner(python: str, output: Path) -> int:
             probe.goto(base + "/#key=" + api_key)
             probe.wait_for_selector("[data-ai-feed] [data-ai-state='loading']", timeout=10000)
             checks.check("feed_building_panel", probe.text_content("[data-ai-building-title]") == "Building your recommendations"
-                         and probe.text_content("[data-ai-state-message]") == "Loading recommendations..." and probe.text_content("[data-ai-building-elapsed]") == "0 s"
+                         and probe.text_content("[data-ai-state-message]") == "Loading recommendations\u2026" and probe.text_content("[data-ai-building-elapsed]") == "0 s"
                          and probe.eval_on_selector("[data-ai-building-note]", "e => getComputedStyle(e).visibility") == "hidden")
             probe.clock.fast_forward(21000)
             checks.check("feed_building_note_after_20s", probe.text_content("[data-ai-building-elapsed]") == "21 s"
@@ -203,7 +203,7 @@ def runner(python: str, output: Path) -> int:
               const line = s.querySelector('.ai-status-line'); const r = p.getBoundingClientRect();
               return { elapsed: p.querySelector('[data-ai-building-elapsed]').textContent, note: getComputedStyle(p.querySelector('[data-ai-building-note]')).visibility,
                        live: s.querySelector('[data-ai-state-message]').textContent, lineHidden: line.getBoundingClientRect().width <= 1, centered: Math.abs((r.left + r.width / 2) - (s.getBoundingClientRect().left + s.getBoundingClientRect().width / 2)) < 2, tall: r.height >= 200 }; })()""")
-            checks.check("home_building_panel_clock_and_layout", home_panel["elapsed"] == "21 s" and home_panel["note"] == "visible" and home_panel["live"] == "Loading recommendations..."
+            checks.check("home_building_panel_clock_and_layout", home_panel["elapsed"] == "21 s" and home_panel["note"] == "visible" and home_panel["live"] == "Loading recommendations\u2026"
                          and home_panel["lineHidden"] and home_panel["centered"] and home_panel["tall"], home_panel)
             probe.close()
             # cold observation before any delivery: no ranking, no feed call, no store opened
@@ -224,10 +224,11 @@ def runner(python: str, output: Path) -> int:
             checks.check("warm_observation_tripwire", warm["status"] == "ok" and warm["items"] and warm["request_id"] is None and all(i["served_item_id"] is None for i in warm["items"])
                          and after["feed"] == before["feed"] and after["rank"] == before["rank"] and after["sqlite"] == before["sqlite"], [warm.get("status"), before, after])
             first = cells[0]
-            body = first.query_selector("details.ai-explanation .ai-explain-body")
+            first.query_selector("details.ai-explanation > summary").click()  # the body is built on first open
+            body = first.wait_for_selector("details.ai-explanation .ai-explain-body", timeout=5000)
             raw = first.query_selector("details.ai-explanation-raw")
             text, raw_text = body.text_content() if body else "", raw.text_content() if raw else ""
-            checks.check("explanation_words_and_not_measured", body is not None and "not measured" in text and "Why this item" in first.text_content(), text[:160])
+            checks.check("explanation_words_and_not_measured", body is not None and "not measured" in text and "Why this pick" in first.text_content(), text[:160])
             checks.check("raw_json_only_in_closed_technical_details", raw is not None and not raw.evaluate("e => e.open") and "explanation" in raw_text.lower()
                          and "{" not in text.replace(raw_text, ""))
             shot(page, "feed")
@@ -467,15 +468,15 @@ def runner(python: str, output: Path) -> int:
                          and "Matching moment" in page.inner_text("[data-ai-search-grid]") and "position not measured" not in page.inner_text("[data-ai-search-grid]"))
             # 7b. Sound and Both dispatch once in the chosen mode; the mode lives in the route state
             searches_before = len(control_call(f"{control}/counters")["search"])
-            page.select_option("#ai-search-mode", "sound")
             page.fill("#ai-search-query", "amber")
+            page.click("#ai-search-mode [data-mode='sound']")  # picking the mode writes the prefix into the words
             page.click("form.search-form button[type='submit']")
             page.wait_for_selector("[data-ai-search-status][data-ai-state]", timeout=10000)
             page.wait_for_function("document.querySelector('[data-ai-search-status]').getAttribute('data-ai-state') !== 'loading'", timeout=10000)
             page.wait_for_timeout(300)
             sound_requests = control_call(f"{control}/counters")["search"][searches_before:]
             checks.check("search_mode_kept_in_route_state", sound_requests == [{"q": "amber", "mode": "sound"}] and "mode=sound" in page.evaluate("location.hash")
-                         and page.evaluate("document.querySelector('#ai-search-mode').value") == "sound", [sound_requests, page.evaluate("location.hash")])
+                         and page.evaluate("document.querySelector('#ai-search-mode input:checked').value") == "sound", [sound_requests, page.evaluate("location.hash")])
             page.evaluate("location.hash = '#/similar?id=1'")
             page.wait_for_selector("[data-ai-similar-grid] .card", timeout=15000)
             checks.check("similar_results", len(page.query_selector_all("[data-ai-similar-grid] .card")) >= 1)

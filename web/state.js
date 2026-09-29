@@ -3,13 +3,13 @@
    visual only; timers are always cleared when the host leaves the loading state. */
 
 const MESSAGES = {
-  loading: "Loading recommendations...",
-  unavailable: "The engine is unavailable. Retry when it is ready.",
-  error: "The request failed. Please retry.",
-  empty: "No recommendations matched this request.",
-  partial: "Some components are unavailable. This result may be incomplete.",
-  "no-feature": "No usable feature is available for this request.",
-  "configuration-required": "Configuration required: open the address printed by the server, which carries the shared key for this exact origin.",
+  loading: "Loading recommendations\u2026",
+  unavailable: "The engine is not answering. It may still be starting; retry in a moment.",
+  error: "The request failed. Retry, or reload the page if it keeps failing.",
+  empty: "Nothing matched this request.",
+  partial: "Some parts of the engine are unavailable, so this result may be incomplete.",
+  "no-feature": "No usable feature is available for this request. Search needs a text encoder and a matching feature space.",
+  "configuration-required": "Configuration required: open the address the server printed at start-up. It carries the shared key for this exact address.",
 };
 
 /* Update an empty, mounted live region on the next task; superseded text is discarded. */
@@ -126,6 +126,11 @@ export function toast(text, action, label) {
   document.getElementById("toasts").appendChild(box);
   setTimeout(() => box.remove(), action ? 12000 : 6000);
   return box;
+}
+
+/* Displayed decimals go through the reader's locale, never toFixed. */
+export function formatNumber(value, digits = 2, fixed = false) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits, minimumFractionDigits: fixed ? digits : 0 }).format(value);
 }
 
 export function formatTime(seconds) {

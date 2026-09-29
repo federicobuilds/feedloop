@@ -2,26 +2,30 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b0d10">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0A0B0D">
+<meta name="color-scheme" content="dark">
 <title>feedloop</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/styles.css">
 <script type="module" src="/app.js"></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <div class="shell">
-  <nav class="rail" aria-label="Views">
+  <header class="rail">
     <a class="brand" href="#/feed" translate="no">feed<span>loop</span></a>
-    <ul>
-      <li><a href="#/feed" data-view="feed">Feed</a></li>
-      <li><a href="#/home" data-view="home">Home</a></li>
-      <li><a href="#/search" data-view="search">Search</a></li>
-      <li><a href="#/similar" data-view="similar">Similar</a></li>
-      <li><a href="#/engine" data-view="engine">Engine</a></li>
-    </ul>
-    <p class="rail-note" id="rail-note" aria-live="polite"></p>
-  </nav>
+    <span class="demo-badge" id="demo-badge" hidden>Demo<span class="sr-only"></span></span>
+    <nav class="tabs" aria-label="Views">
+      <ul>
+        <li><a href="#/feed" data-view="feed"><span>Feed</span></a></li>
+        <li><a href="#/home" data-view="home"><span>Home</span></a></li>
+        <li><a href="#/search" data-view="search"><span>Search</span></a></li>
+        <li><a href="#/similar" data-view="similar"><span>Similar</span></a></li>
+        <li><a href="#/engine" data-view="engine"><span>Engine</span></a></li>
+      </ul>
+    </nav>
+  </header>
   <main id="main" class="main" tabindex="-1"></main>
 </div>
 <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>

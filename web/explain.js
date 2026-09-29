@@ -1,16 +1,75 @@
-/* "Why this item" in words and bars; the raw fields stay behind a nested "Technical
+/* "Why this pick" in words and bars; the raw fields stay behind a nested "Technical
    details" disclosure. An absent measurement is "not measured", never a zero bar.
-   Contributor names appear only when the item carries them. */
+   Contributor names appear only when the item carries them. The body is built on first
+   open, so a page of cards does not pay for explanations nobody reads. The evidence strip
+   is the glanceable form of the same signals and opens this disclosure. */
+import { formatNumber } from "./state.js";
 
 function number(value) { return typeof value === "number" && Number.isFinite(value) ? value : null; }
 function percent(multiplier) { const delta = Math.round((multiplier - 1) * 100); return (delta > 0 ? "+" : "") + delta + "%"; }
+
+function signalsOf(item) {
+  const c = item.explanation || item.similar || item.search || {};
+  return [["tags", "Tags", number(c.tag_similarity != null ? c.tag_similarity : c.tag_normalized)], ["look", "Look", number(c.visual_similarity)],
+    ["sound", "Sound", number(c.sound_similarity)], ["voice", "Voice", number(c.voice_similarity)]];
+}
+
+/* One segment per signal. Measured segments share the width by value; an unmeasured one
+   keeps a fixed hatched slot, so "not measured" never reads as zero. */
+const UNMEASURED_SHARE = 12;
+export function evidenceStrip(item, details, { legend = false } = {}) {
+  const signals = signalsOf(item);
+  const measured = signals.filter(([, , value]) => value !== null);
+  const total = measured.reduce((sum, [, , value]) => sum + Math.max(0, value), 0);
+  const room = 100 - (signals.length - measured.length) * UNMEASURED_SHARE;
+  const words = signals.map(([, label, value]) => label + " " + (value === null ? "not measured" : formatNumber(value, 2, true))).join(", ");
+  const strip = document.createElement("button");
+  strip.type = "button";
+  strip.className = "evidence";
+  strip.setAttribute("aria-label", "Evidence: " + words + ". Show why this pick");
+  strip.title = words;
+  const bar = document.createElement("span");
+  bar.className = "evidence-bar";
+  signals.forEach(([key, , value]) => {
+    const segment = document.createElement("span");
+    segment.className = "evidence-seg is-" + key + (value === null ? " is-missing" : "");
+    const share = value === null ? UNMEASURED_SHARE : total > 0 ? room * Math.max(0, value) / total : room / measured.length;
+    segment.style.flexGrow = String(share);
+    bar.appendChild(segment);
+  });
+  strip.appendChild(bar);
+  if (legend) {
+    const keys = document.createElement("span");
+    keys.className = "evidence-legend";
+    signals.forEach(([key, label, value]) => {
+      const entry = document.createElement("span");
+      entry.className = "is-" + key + (value === null ? " is-missing" : "");
+      entry.textContent = label + " " + (value === null ? "not measured" : formatNumber(value, 2, true));
+      keys.appendChild(entry);
+    });
+    strip.appendChild(keys);
+  }
+  strip.addEventListener("click", event => {
+    event.stopPropagation();
+    details.open = true;
+    details.querySelector("summary").focus({ preventScroll: true });
+    details.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  });
+  return strip;
+}
 
 export function explanation(item) {
   const details = document.createElement("details");
   details.className = "ai-explanation";
   const summary = document.createElement("summary");
-  summary.textContent = "Why this item";
+  summary.textContent = "Why this pick";
   details.appendChild(summary);
+  details.addEventListener("toggle", () => { if (details.open && !details.querySelector(".ai-explain-body")) details.appendChild(explanationBody(item)); });
+  details.addEventListener("click", e => e.stopPropagation());
+  return details;
+}
+
+function explanationBody(item) {
   const c = item.explanation || item.similar || item.search || {};
   const selection = c.selection && typeof c.selection === "object" ? c.selection : {};
   const body = document.createElement("div");
@@ -37,7 +96,7 @@ export function explanation(item) {
       track.setAttribute("aria-label", label + ": not measured"); shown.textContent = "not measured"; line.classList.add("is-missing");
     } else {
       const fill = document.createElement("span"); fill.style.width = Math.round(Math.max(0, Math.min(1, value)) * 100) + "%"; track.appendChild(fill);
-      track.setAttribute("aria-label", label + ": " + value.toFixed(2)); shown.textContent = value.toFixed(2);
+      track.setAttribute("aria-label", label + ": " + formatNumber(value, 2, true)); shown.textContent = formatNumber(value, 2, true);
     }
     line.append(name, track, shown); bars.appendChild(line);
   });
@@ -46,7 +105,7 @@ export function explanation(item) {
     const value = number(raw);
     if (value !== null && value !== 1) adjustments.push(label + " " + percent(value));
   });
-  if (number(selection.diversity_penalty) !== null && selection.diversity_penalty > 0) adjustments.push("Variety on this page \u2212" + selection.diversity_penalty.toFixed(2));
+  if (number(selection.diversity_penalty) !== null && selection.diversity_penalty > 0) adjustments.push("Variety on this page \u2212" + formatNumber(selection.diversity_penalty, 2, true));
   if (adjustments.length) {
     const list = document.createElement("ul"); list.className = "ai-explain-list";
     adjustments.forEach(text => { const entry = document.createElement("li"); entry.textContent = text; list.appendChild(entry); });
@@ -105,7 +164,5 @@ export function explanation(item) {
     row.append(label, value); raw.appendChild(row);
   });
   body.appendChild(raw);
-  details.appendChild(body);
-  details.addEventListener("click", e => e.stopPropagation());
-  return details;
+  return body;
 }
