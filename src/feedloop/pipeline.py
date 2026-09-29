@@ -48,32 +48,79 @@ def sims_over(m, index, qvec, ids):
     return {i: float(m[index[i]].astype(np.float32) @ qvec) for i in ids if i in index}
 
 
+NO_VIEW = (None, None, None)
+
+
+def _unit_view(ids, rows):
+    # 2026-09-29 (E-7): the slot allows non-unit finite rows, so similarity would follow row
+    # length; rows are scaled to unit once here and zero rows leave the view entirely
+    rows = np.asarray(rows, dtype=np.float32)
+    norms = np.linalg.norm(rows, axis=1)
+    keep = norms > 0
+    if not keep.any():
+        return NO_VIEW
+    ids = [sid for sid, kept in zip(ids, keep) if kept]
+    return ids, rows[keep] / norms[keep, None], {sid: row for row, sid in enumerate(ids)}
+
+
 class KindMatrices:
-    """Per-kind (ids, matrix, {id: row}) views of the FeatureSpaces matrices, kept while the
-    slot hands back the same array."""
+    """Per-kind (ids, unit-row matrix, {id: row}) views of the FeatureSpaces matrices, kept
+    while the slot hands back the same array at the same revision."""
 
     def __init__(self, spaces):
         self.spaces, self._memo = spaces, {}
 
-    def get(self, space, kind):
-        available = space in set(self.spaces.spaces())
-        loaded = self.spaces.matrix(space) if available else None
-        if loaded is None:
-            return None, None, None
-        keys, m = loaded
-        entry = self._memo.get((space, kind))
-        if entry is not None and entry[0] is m:
-            return entry[1]
-        positions = [i for i, key in enumerate(keys) if key[0] == kind]
-        if not positions:
-            value = (None, None, None)
+    def _loaded(self, space):
+        return self.spaces.matrix(space) if space in set(self.spaces.spaces()) else None
+
+    def _cached(self, key, arrays, spaces, build):
+        # 2026-09-29 (E-8): identity alone misses an in-place rewrite, so the revision is part
+        # of the key and nothing is kept when a space reports no revision
+        revision = tuple(self.spaces.revision(space) for space in spaces)
+        entry = self._memo.get(key)
+        if entry is not None and entry[1] == revision and all(a is b for a, b in zip(entry[0], arrays)):
+            return entry[2]
+        value = build()
+        if None in revision:
+            self._memo.pop(key, None)
         else:
+            self._memo[key] = (arrays, revision, value)
+        return value
+
+    def get(self, space, kind):
+        loaded = self._loaded(space)
+        if loaded is None:
+            return NO_VIEW
+        keys, m = loaded
+
+        def build():
+            positions = [i for i, key in enumerate(keys) if key[0] == kind]
+            if not positions:
+                return NO_VIEW
             first, last = positions[0], positions[-1]
             sub = m[first:last + 1] if last - first + 1 == len(positions) else m[positions]
-            ids = [int(keys[i][1]) for i in positions]
-            value = (ids, sub, {sid: row for row, sid in enumerate(ids)})
-        self._memo[(space, kind)] = (m, value)
-        return value
+            return _unit_view([int(keys[i][1]) for i in positions], sub)
+        return self._cached(("space", space, kind), (m,), (space,), build)
+
+    def paired(self, first, second, kind):
+        """The look view: each item's unit first-space and second-space rows side by side over
+        sqrt(2), the width the paired frame windows are scored in."""
+        a, b = self._loaded(first), self._loaded(second)
+        if a is None or b is None:
+            return NO_VIEW
+
+        def build():
+            ids_a, m_a, _index_a = self.get(first, kind)
+            ids_b, m_b, index_b = self.get(second, kind)
+            if ids_a is None or ids_b is None:
+                return NO_VIEW
+            rows_a = [row for row, sid in enumerate(ids_a) if sid in index_b]
+            if not rows_a:
+                return NO_VIEW
+            ids = [ids_a[row] for row in rows_a]
+            m = np.concatenate([m_a[rows_a], m_b[[index_b[sid] for sid in ids]]], axis=1) / np.float32(np.sqrt(2.0))
+            return ids, m, {sid: row for row, sid in enumerate(ids)}
+        return self._cached(("paired", first, second, kind), (a[1], b[1]), (first, second), build)
 
 
 def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, links, views, now, matrices,
@@ -97,6 +144,11 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
     knobs = {k: float(c[k]) for k in ("embedding_weight", "contributor_affinity_weight", "taste_audio_weight", "taste_mix_weight")}
     experiment = c.get("experiment")
     active = experiment["knob"] if experiment else None
+    # 2026-09-29 (E-4): hosts name their spaces through space_roles, so every read goes through
+    # the role mapping; the paired look view is built from the visual and semantic roles
+    roles = c["vector_spaces"]
+    visual_space, semantic_space = roles["visual"], roles["semantic"]
+    voice_space, sound_space = roles["voice"], roles["sound"]
 
     # catalog facts: tag seconds and categories of every primary item, durations of every item
     tags, item_categories = {}, {}
@@ -141,7 +193,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
         events = {k: {"rating": r.get("rating"), "engagement_count": int(r.get("engagement_count") or 0)}
                   for k, r in sorted(signal_rows.items()) if k[0] == secondary
                   and (r.get("rating") is not None or int(r.get("engagement_count") or 0) > 0)}
-    means_s = matrices.get("means", secondary) if events else (None, None, None)
+    means_s = matrices.paired(visual_space, semantic_space, secondary) if events else NO_VIEW
     tag_extras, vec_extras = [], []
     if events:
         coverage = {k: features.get(k, {}).get("tag_seconds") or {} for k in events}
@@ -213,7 +265,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
         return m, index
 
     def look_scores(qvec, channel_queries, *, kind, item_ids=None):
-        ids, m, index = matrices.get("means", kind)
+        ids, m, index = matrices.paired(visual_space, semantic_space, kind)
         if item_ids is not None and kind == primary:
             paired = sims_over(m, index, qvec, item_ids) if qvec is not None else {}
         else:
@@ -227,18 +279,17 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
                             else dict(zip(ids_c, map(float, taste.chunked_dot(m_c, query)))))
         return ranking.merge_look_scores(paired, channels)
 
-    def embedding_source(space, query):
+    def embedding_source(ids, m, query):
         if allowed is not None and not allowed:
             return []
-        ids, m, _index = matrices.get(space, primary)
         return ranking.embedding_candidates(ids, m, query, exclude=hard_exclude, eligible_ids=allowed, limit=budget, kind=primary)
 
     profile_vec, look_queries, profile_audio, profile_mix = None, {}, None, None
     source_orders = {}
-    means_ids, means_m, means_index = matrices.get("means", primary)
+    means_ids, means_m, means_index = matrices.paired(visual_space, semantic_space, primary)
     if source_knobs["embedding_weight"] > 0:
         profile_vec = taste_query(means_m, means_index, vec_extras)
-        for model in ("visual", "semvisual"):
+        for model in dict.fromkeys((visual_space, semantic_space)):
             m, index = look(primary, model)
             extras = []
             if events:
@@ -258,15 +309,15 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
             source_orders["visual"] = [sid for sid in sorted(scores, key=lambda sid: (-scores[sid], sid))
                                        if sid not in hard_exclude and (allowed_set is None or sid in allowed_set)][:budget]
         else:
-            source_orders["visual"] = embedding_source("means", profile_vec)
-        _i, audio_m, audio_index = matrices.get("audioembed", primary)
-        _i, mix_m, mix_index = matrices.get("audiomix", primary)
+            source_orders["visual"] = embedding_source(means_ids, means_m, profile_vec)
+        audio_ids, audio_m, audio_index = matrices.get(voice_space, primary)
+        mix_ids, mix_m, mix_index = matrices.get(sound_space, primary)
         profile_audio = taste_query(audio_m, audio_index)
         profile_mix = taste_query(mix_m, mix_index)
-        for source, space, query, weight in (("voice", "audioembed", profile_audio, source_knobs["taste_audio_weight"]),
-                                             ("sound", "audiomix", profile_mix, source_knobs["taste_mix_weight"])):
+        for source, ids, m, query, weight in (("voice", audio_ids, audio_m, profile_audio, source_knobs["taste_audio_weight"]),
+                                              ("sound", mix_ids, mix_m, profile_mix, source_knobs["taste_mix_weight"])):
             if query is not None and weight > 0:
-                source_orders[source] = embedding_source(space, query)
+                source_orders[source] = embedding_source(ids, m, query)
 
     # 4. bound the tag source on the capped rough score, admit, hydrate the union
     def pool_key(vec):
@@ -349,17 +400,15 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
     # 6. secondary lane: request exclusions, disliked items never return, fatigue by view days;
     # items absent from the pinned catalog are dropped after the cut
     secondary_comps = []
+    allowed_s = eligible.get(secondary) if include_secondary else ()
+    allowed_s = None if allowed_s is None else frozenset(allowed_s)
+    disliked_s = {k[1] for k, e in events.items() if taste.verdict(
+        0.0, 0.0, finished_ratio=finished_ratio, abandon_ratio=abandon_ratio, rating=e["rating"],
+        rating_strength=rating_strength, engagement_count=e["engagement_count"])[1]}
     if include_secondary and (profile_vec is not None or look_queries):
         sims = look_scores(profile_vec, look_queries, kind=secondary)
-        allowed_s = eligible.get(secondary)
-        allowed_s = None if allowed_s is None else frozenset(allowed_s)
         for iid in sorted(sims, key=lambda iid: (-sims[iid], iid)):
-            if iid in exclude_secondary or (allowed_s is not None and iid not in allowed_s):
-                continue
-            event = events.get((secondary, iid))
-            if event and taste.verdict(0.0, 0.0, finished_ratio=finished_ratio, abandon_ratio=abandon_ratio,
-                                       rating=event["rating"], rating_strength=rating_strength,
-                                       engagement_count=event["engagement_count"])[1]:
+            if iid in exclude_secondary or (allowed_s is not None and iid not in allowed_s) or iid in disliked_s:
                 continue
             vals = [aff_map[i]["affinity"] for i in item_links.get((secondary, iid), ()) if i in aff_map]
             delta = sum(vals) / len(vals) - aff_prior if vals else None
@@ -397,7 +446,14 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
         # the whole-catalog scan runs only when selection left nothing
         ids = fallback_ids(hard_exclude | resting, want, eligible_ids=allowed, seed=seed,
                            enumerate_ids=lambda: [key[1] for key in catalog["present"] if key[0] == primary])
-        return [(primary, sid) for sid in ids if (primary, sid) in duration_of]
+        keys = [(primary, sid) for sid in ids if (primary, sid) in duration_of]
+        if include_secondary:
+            # 2026-09-29 (F-1): with no profile the secondary lane is empty, so a cold start
+            # served no images; the fallback offers every requested kind for rank_page to interleave
+            iids = fallback_ids(set(exclude_secondary) | disliked_s, want, eligible_ids=allowed_s, seed=seed,
+                                enumerate_ids=lambda: [key[1] for key in catalog["present"] if key[0] == secondary])
+            keys += [(secondary, iid) for iid in iids if (secondary, iid) in catalog["present"]]
+        return keys
 
     def windows(keys):
         ids = [key[1] for key in keys if key[0] == primary]
