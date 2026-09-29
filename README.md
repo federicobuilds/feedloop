@@ -102,32 +102,41 @@ and works offline. It calls only the server's public routes (`/api/feed`,
 
 - Feed: one full-height item at a time, with a black stage for the player and
   a side panel. A video opens at its matching moment. The panel shows the
-  title, a "Why" line in words, duration, score and category, rating buttons,
-  Next and More like this, and a "Why this item" disclosure with signal bars.
-  An absent signal reads "not measured", never zero. Move with the arrow keys
-  or J and K. Space plays or pauses. A video that scrolls out of view pauses.
-- Home: horizontal shelves, one per category the ranker recorded, with Load
-  more. Hovering a card plays a muted preview after a short delay. Clicking it
-  turns the card into the player. Only that player counts as watching; the
-  preview does not.
-- Search: describe a look in words. Start with `sound:` to search the sound
-  space, or with `both:` to search look and sound together. The buttons under
-  the box insert these prefixes, and the mode menu follows whatever prefix you
-  type. With fixture sidecars search works on videos; an item without segments
-  reports no-feature.
+  title, an evidence strip (one segment per signal, sized by contribution;
+  an unmeasured signal is hatched, never zero), a reason line in words, and
+  one metadata line. Like and Dislike are toggles; pressing an active one
+  clears the rating, with Undo next to the confirmation. A More disclosure
+  holds Clear rating and Count engagement, each explained in one line. Next
+  moves on; More like this opens Similar. Move with the arrow keys or J and
+  K, rate with L and D. Space plays or pauses. A video that scrolls out of
+  view pauses.
+- Home: horizontal shelves, one per category the ranker recorded, with item
+  counts, Load more, and a skeleton while loading. Hovering a card plays a
+  muted preview after a short delay. Clicking it turns the card into the
+  player. Only that player counts as watching; the preview does not. An
+  empty library explains how to add media and sidecars.
+- Search: describe a look in words. A Look / Sound / Both control stays in
+  sync with a typed `sound:` or `both:` prefix in both directions. The mode
+  of the last search is kept in the URL. With fixture sidecars search works
+  on videos; an item without segments reports no-feature.
 - Similar: more like one video, from tag shares blended with mean-vector
-  similarity. Every video card has a More like this button.
-- Engine: the dashboard. Tiles show the taste profile the ranker reported with
-  the latest Feed page in the tab (profile tags, tags pulling up and down,
-  watch evidence), attributed verdicts and liked outcomes, committed watch
-  outcomes and whether automatic tuning is on. Below them are the evidence
-  gates, the running experiment with a like-rate bar for each arm, the knobs,
-  and the reversible tuner ledger. The demo uses a five second attribution
-  window and a fifteen second tick, so a watch shows up here within a minute.
+  similarity. The page shows the seed's thumbnail and title; every video
+  card has a More like this link. Entering an id by hand lives under
+  Advanced.
+- Engine: the dashboard. A summary row shows the taste profile the ranker
+  reported with the latest Feed page, attributed verdicts and liked
+  outcomes, committed watch outcomes, and whether automatic tuning is on.
+  Below it are the evidence gates in plain sentences, the running experiment
+  with a like-rate bar for each arm, the knobs, and the reversible tuner
+  ledger. Refresh shows when the data last updated and auto-refreshes while
+  the tab is visible; Reset knobs asks for confirmation first. The demo uses
+  a five second attribution window and a fifteen second tick, so a watch
+  shows up here within a minute.
 
-The interface is dark, with neutral surfaces so the media carries the colour.
-Motion is short and switches off under `prefers-reduced-motion`, and that
-includes the hover previews.
+The interface is a quiet, dark console with neutral surfaces so the media
+carries the colour. On narrow screens the navigation becomes a bottom tab
+bar. Motion is short and switches off under `prefers-reduced-motion`, and
+that includes the hover previews.
 
 Stop the server with Ctrl-C. State lives in `<folder>/.feedloop`
 (`source.sqlite`, `ledger.sqlite`, `tuner.sqlite`, `spaces/`) unless you pass
@@ -284,8 +293,11 @@ names and types, the attribution rules, and a synthetic capture example.
   Feed still use its means.
 - The base install decodes no media; durations come from sidecars or the
   browser player.
-- Video frame sampling and container audio decoding are not shipped; the
-  extractors have not run against real weights in this repository.
+- The extractors are optional extras (`pip install feedloop[extract]`).
+  Frame sampling and container audio decoding need ffmpeg on the path.
+  Without real model weights the visual and audio spaces fall back to
+  sidecar-text means; verifying the full model weights is the reader's
+  step.
 - Zero-shot tags are weaker than a trained tagger. Knob values are not
   enjoyment probabilities.
 

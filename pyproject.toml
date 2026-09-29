@@ -4,13 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "feedloop"
-version = "0.6.0"
+version = "0.7.0"
 description = "A learning recommendation feed: ranking, an append-only evidence ledger, attribution and taste math over any item catalog."
+readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 authors = [{name = "federicobuilds"}]
 dependencies = ["numpy"]
-classifiers = ["License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/federicobuilds/feedloop"
+Repository = "https://github.com/federicobuilds/feedloop"
 
 [project.optional-dependencies]
 dev = ["pytest"]
