@@ -383,7 +383,8 @@ def runner(python: str, output: Path) -> int:
             page.route("**/api/search**", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({"status": "no-feature", "items": [], "components": {"look": {"status": "no-feature"}}})))
             page.evaluate("location.hash = '#/search?q=amber'")
             page.wait_for_selector("[data-ai-search-status][data-ai-state='no-feature']", timeout=10000)
-            checks.check("search_state_no_feature", "No usable feature" in page.text_content("[data-ai-search-status] [data-ai-state-message]"))
+            checks.check("search_state_no_feature", "isn't set up for this library" in page.text_content("[data-ai-search-status] [data-ai-state-message]")
+                         and page.query_selector("[data-ai-search-status] [data-ai-retry]:not([hidden])") is None)
             page.unroute("**/api/search**")
             # 6. Home: shelves, skip-aware offset forwarding, stale restart keeps card identity
             open_view("home")
@@ -500,8 +501,8 @@ def runner(python: str, output: Path) -> int:
             page.wait_for_selector("[data-ai-feed] [data-ai-state='configuration-required']", timeout=15000)
             checks.check("denied_delivery_is_configuration_required", "Configuration required" in page.text_content("[data-ai-feed] [data-ai-state-message]")
                          and page.query_selector("[data-ai-feed] [data-ai-retry]") is not None and page.query_selector("[data-idx]") is None)
-            views = ["feed", "home", "search", "similar", "engine"]
-            checks.check("five_views_reachable", all(page.query_selector(f"a[data-view='{v}']") for v in views))
+            views = ["feed", "home", "search", "engine"]
+            checks.check("four_tabs_reachable", all(page.query_selector(f"a[data-view='{v}']") for v in views))
             errors = [c for c in console if c["type"] in ("error", "pageerror") and "Failed to load resource" not in c["text"]]
             checks.check("no_console_errors", not errors, errors[:5])
             browser.close()

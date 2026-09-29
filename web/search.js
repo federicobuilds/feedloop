@@ -69,10 +69,31 @@ export function mountSearch(host) {
     grid.setAttribute("aria-busy", String(busy));
   }
 
+  /* Actions under an empty or unset-up result change the request: edit the words or
+     search another mode. A same-query Retry would only repeat the miss. */
+  function offer(q, m, text, diagnostic, blocked = []) {
+    const box = document.createElement("div");
+    box.className = "search-offer"; box.setAttribute("data-ai-search-offer", "1");
+    if (diagnostic) box.appendChild(Object.assign(document.createElement("p"), { className: "diagnostic", textContent: diagnostic }));
+    if (text) box.appendChild(Object.assign(document.createElement("p"), { textContent: text }));
+    const actions = document.createElement("div"); actions.className = "feedback-actions";
+    const edit = Object.assign(document.createElement("button"), { type: "button", textContent: "Edit words" });
+    edit.onclick = () => { field.focus(); field.select(); };
+    actions.appendChild(edit);
+    radios.filter(radio => radio.value !== m && !(blocked.length && (radio.value === "both" || blocked.includes(radio.value)))).forEach(radio => {
+      const other = Object.assign(document.createElement("button"), { type: "button", textContent: "Search " + MODE_WORDS[radio.value] + " instead" });
+      other.onclick = () => { field.value = q; setMode(radio.value); form.requestSubmit(); };
+      actions.appendChild(other);
+    });
+    box.appendChild(actions);
+    status.appendChild(box);
+  }
+
   function run(q, m) {
     const current = ++generation;
     if (controller) controller.abort();
     grid.textContent = ""; head.textContent = "";
+    const stale = status.querySelector("[data-ai-search-offer]"); if (stale) stale.remove();
     if (!q.trim()) { announce(head, "Type a few words to search."); field.focus(); return; }
     controller = new AbortController();
     pending(true);
@@ -80,14 +101,28 @@ export function mountSearch(host) {
     getJSON("search?" + new URLSearchParams({ q, mode: m, limit: "24" }), "items", controller.signal).then(d => {
       if (current !== generation) return;
       const items = d.items || [];
-      if (!items.length) { setState(status, d.status === "partial" ? "partial" : "empty", () => run(q, m)); return; }
+      if (!items.length && d.status === "partial") { setState(status, "partial", () => run(q, m)); return; }
+      if (!items.length) {
+        setState(status, "empty", null, "Nothing matched \u201C" + q + "\u201D in " + MODE_WORDS[m] + ".");
+        offer(q, m, "Try fewer or different words, or search another mode.");
+        return;
+      }
       status.textContent = ""; status.removeAttribute("data-ai-state");
       announce(head, formatNumber(items.length, 0) + (items.length === 1 ? " match" : " matches") + " for \u201C" + q + "\u201D in " + MODE_WORDS[m]);
       items.forEach((item, index) => grid.appendChild(gridCard(item, { eager: index === 0 })));
       partial(status, d, () => run(q, m));
     }).catch(error => {
       if (current !== generation || isAbort(error)) return;
-      setState(status, error.state || "unavailable", () => run(q, m));
+      if (error.state === "no-feature") {
+        const missing = Object.entries(error.components || {}).filter(([, c]) => (c && c.status) === "no-feature").map(([name]) => name);
+        const names = missing.length ? missing : m === "both" ? ["look", "sound"] : [m];
+        const what = names.map(name => MODE_WORDS[name] || name).join(" and ");
+        setState(status, "no-feature", null, what.charAt(0).toUpperCase() + what.slice(1) + " search " + (names.length > 1 ? "aren't" : "isn't") + " set up for this library.");
+        offer(q, m, null, "Diagnostic: no text encoder or no matching feature space for " + names.join(", ") + " (no-feature).", names);
+        return;
+      }
+      const state = error.state || "unavailable";
+      setState(status, state, ["unavailable", "error"].includes(state) ? () => run(q, m) : null);
     }).finally(() => { if (current === generation) pending(false); });
   }
   /* The hash is the route state (q and mode); a submit that changes it remounts the view,

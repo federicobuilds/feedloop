@@ -8,7 +8,7 @@ const MESSAGES = {
   error: "The request failed. Retry, or reload the page if it keeps failing.",
   empty: "Nothing matched this request.",
   partial: "Some parts of the engine are unavailable, so this result may be incomplete.",
-  "no-feature": "No usable feature is available for this request. Search needs a text encoder and a matching feature space.",
+  "no-feature": "This search isn't set up for this library.",
   "configuration-required": "Configuration required: open the address the server printed at start-up. It carries the shared key for this exact address.",
 };
 
@@ -19,7 +19,9 @@ export function announce(region, text) {
   region.__announcement = setTimeout(() => { if (region.isConnected) region.textContent = text; }, 0);
 }
 
-export function setState(host, state, retry) {
+/* `text` replaces the stock message when the caller can name the problem more exactly.
+   Retry shows only when the caller passes one, which it does for network and server failures. */
+export function setState(host, state, retry, text) {
   host.setAttribute("data-ai-state", state);
   host.removeAttribute("aria-busy");
   let message = host.querySelector("[data-ai-state-message]");
@@ -34,7 +36,7 @@ export function setState(host, state, retry) {
     line.appendChild(message);
     host.appendChild(line);
   }
-  announce(message, MESSAGES[state]);
+  announce(message, text || MESSAGES[state]);
   let button = host.querySelector("[data-ai-retry]");
   if (!button && retry && state !== "loading") {
     button = document.createElement("button");
@@ -44,6 +46,7 @@ export function setState(host, state, retry) {
     message.parentElement.appendChild(button);
   }
   if (button) {
+    button.hidden = !retry && state !== "loading";
     button.setAttribute("aria-disabled", String(state === "loading" || !retry));
     button.onclick = () => { if (button.getAttribute("aria-disabled") !== "true") retry(); };
   }

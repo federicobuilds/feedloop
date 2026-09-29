@@ -1,4 +1,4 @@
-/* Hash router over the five views. The address printed by the server carries the shared
+/* Hash router over the five views (four tabs; Similar opens from More like this). The address printed by the server carries the shared
    key once (#key=...); it is kept in session storage and never rendered. Each route sets
    the document title; a navigation to another view moves focus to its heading. */
 import { apiKey, config } from "./api.js";
@@ -19,7 +19,9 @@ const TITLES = { feed: "Feed", home: "Home", search: "Search", similar: "Similar
 document.querySelectorAll(".tabs a[data-view]").forEach(a => a.prepend(icon(a.dataset.view)));
 
 function route(event) {
-  const path = (location.hash.replace(/^#\/?/, "") || "feed").split("?")[0];
+  const [path, query] = (location.hash.replace(/^#\/?/, "") || "feed").split("?");
+  // Similar only makes sense for a seed; without one, replace the entry with Feed.
+  if (path === "similar" && !new URLSearchParams(query || "").get("id")) { location.replace("#/feed"); return; }
   const name = VIEWS[path] ? path : "feed";
   const sameView = current && current.name === name;
   const focusedId = sameView && document.activeElement && main.contains(document.activeElement) ? document.activeElement.id : "";
@@ -38,6 +40,8 @@ function route(event) {
   }
 }
 
+// The skip link's own #main would be read as a route and remount Feed; it only moves focus.
+document.querySelector(".skip").addEventListener("click", event => { event.preventDefault(); main.focus(); });
 window.addEventListener("hashchange", route);
 route();
 config().then(c => {

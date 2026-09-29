@@ -4,7 +4,7 @@
    real player is attached to watch capture, because a hover preview is not watching.
    Videos get their source only when they come near the viewport; still images open a
    full-size viewer. */
-import { evidenceStrip, explanation } from "./explain.js";
+import { evidenceStrip, explanation, strongestSignal } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
 import { attachPlayer } from "./watch.js";
 import { formatTime } from "./state.js";
@@ -34,14 +34,27 @@ function startOf(item) {
 
 function titleOf(item) { return item.title || ("Item " + item.id); }
 
-export function whyText(item) {
+function reasonText(item, video) {
   if (item.reason) return item.reason;
   if (item.search) {
-    const moment = item.search.best_t, duration = durationOf(item);
+    const moment = item.search.best_t;
+    const duration = durationOf(item) || (video && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null);
     return moment != null && !(duration && moment >= duration) ? "Matching moment " + formatTime(moment) : "Matches your words";
   }
-  if (item.similar) return "Shares tags with the seed";
+  if (item.similar) return strongestSignal(item) || "Similar to this item";
   return "No reason was recorded for this pick.";
+}
+
+/* A moment at or past the clip's end is dropped, the same rule startOf uses for the
+   start. When the duration is only known once the player's metadata loads, relabel then. */
+export function whyText(item, reasonEl, video) {
+  if (reasonEl && video && item.search && !item.reason && !durationOf(item)) {
+    video.addEventListener("loadedmetadata", () => {
+      reasonEl.textContent = reasonText(item, video);
+      reasonEl.title = reasonEl.textContent;
+    }, { once: true });
+  }
+  return reasonText(item, video);
 }
 
 export function similarHref(item) {
@@ -230,7 +243,7 @@ export function gridCard(item, { headingLevel = 2, eager = false } = {}) {
   body.className = "body";
   const title = document.createElement("h" + headingLevel); title.className = "card-heading"; title.textContent = titleOf(item); title.title = titleOf(item);
   const why = explanation(item);
-  const reason = document.createElement("p"); reason.className = "reason"; reason.textContent = whyText(item); reason.title = reason.textContent;
+  const reason = document.createElement("p"); reason.className = "reason"; reason.textContent = whyText(item, reason, box.querySelector("video")); reason.title = reason.textContent;
   const extras = item.kind === "video" ? [similarLink(item, true)] : [];
   body.append(title, evidenceStrip(item, why), reason, metaLine(item, box.querySelector("video")), feedbackControls(item, { extras, compact: true }), why);
   card.appendChild(body);

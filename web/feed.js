@@ -64,7 +64,7 @@ export function mountFeed(host) {
       side.className = "card-side";
       const title = document.createElement("h2"); title.className = "card-title"; title.textContent = item.title || ("Item " + item.id);
       const why = explanation(item);
-      const reason = document.createElement("p"); reason.className = "card-reason"; reason.textContent = whyText(item);
+      const reason = document.createElement("p"); reason.className = "card-reason"; reason.textContent = whyText(item, reason, mediaBox.querySelector("video"));
       const next = document.createElement("button"); next.type = "button"; next.className = "action primary";
       next.append(icon("next"), "Next"); next.onclick = () => move(index + 1);
       const extras = [next];

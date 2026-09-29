@@ -50,7 +50,8 @@ def test_client_works_offline_and_keeps_its_hooks():
     for name, body in text.items():
         assert not re.search(r"https?://|//cdn|@import", body), name
     html = text["index.html"]
-    assert all(f'data-view="{view}"' in html for view in ("feed", "home", "search", "similar", "engine"))
+    assert all(f'data-view="{view}"' in html for view in ("feed", "home", "search", "engine"))
+    assert 'data-view="similar"' not in html
     js = "\n".join(body for name, body in text.items() if name.endswith(".js"))
     for hook in ("data-ai-feed", "data-idx", "data-ai-home-key", "data-ai-home-status", "data-ai-load-more", "data-ai-search-grid",
                  "data-ai-search-status", "ai-search-mode", "data-ai-similar-grid", "data-ai-feedback", "data-ai-undo",

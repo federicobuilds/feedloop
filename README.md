@@ -120,9 +120,9 @@ and works offline. It calls only the server's public routes (`/api/feed`,
   of the last search is kept in the URL. With fixture sidecars search works
   on videos; an item without segments reports no-feature.
 - Similar: more like one video, from tag shares blended with mean-vector
-  similarity. The page shows the seed's thumbnail and title; every video
-  card has a More like this link. Entering an id by hand lives under
-  Advanced.
+  similarity. It is not a tab: it opens from More like this on a video
+  card, with a Back control and the seed's thumbnail, title and Change
+  (enter another id). Without a seed it returns to Feed.
 - Engine: the dashboard. A summary row shows the taste profile the ranker
   reported with the latest Feed page, attributed verdicts and liked
   outcomes, committed watch outcomes, and whether automatic tuning is on.

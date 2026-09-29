@@ -2,60 +2,112 @@
    details" disclosure. An absent measurement is "not measured", never a zero bar.
    Contributor names appear only when the item carries them. The body is built on first
    open, so a page of cards does not pay for explanations nobody reads. The evidence strip
-   is the glanceable form of the same signals and opens this disclosure. */
+   is the glanceable form of the same signals and opens this disclosure. Below 640 px the
+   body opens in a full-height sheet instead of inline, so it never lands off screen. */
 import { formatNumber } from "./state.js";
+import { icon } from "./icons.js";
 
 function number(value) { return typeof value === "number" && Number.isFinite(value) ? value : null; }
 function percent(multiplier) { const delta = Math.round((multiplier - 1) * 100); return (delta > 0 ? "+" : "") + delta + "%"; }
+const narrow = matchMedia("(max-width: 640px)");
+
+/* The wording follows the surface: Feed and Home compare with what you watch, Similar with
+   the seed item, Search with your words. Strip, legend and breakdown all read from here. */
+const LABELS = {
+  feed: { tags: "Tags you like", look: "Looks like what you watch", sound: "Sounds like what you watch", voice: "Voice like what you watch" },
+  similar: { tags: "Shares tags with this item", look: "Looks like this item", sound: "Sounds like this item", voice: "Voice like this item" },
+  search: { query: "Matches your words", tags: "Tag match", look: "Look match", sound: "Sound match", voice: "Voice match" },
+};
+const SHORT = { query: "Words", tags: "Tags", look: "Look", sound: "Sound", voice: "Voice" };
 
 function signalsOf(item) {
   const c = item.explanation || item.similar || item.search || {};
-  return [["tags", "Tags", number(c.tag_similarity != null ? c.tag_similarity : c.tag_normalized)], ["look", "Look", number(c.visual_similarity)],
-    ["sound", "Sound", number(c.sound_similarity)], ["voice", "Voice", number(c.voice_similarity)]];
+  const surface = item.explanation ? "feed" : item.similar ? "similar" : item.search ? "search" : "feed";
+  const tags = surface === "feed" ? c.tag_normalized : c.tag_similarity != null ? c.tag_similarity : c.tag_normalized;
+  const values = { query: number(c.query_score), tags: number(tags), look: number(c.visual_similarity), sound: number(c.sound_similarity), voice: number(c.voice_similarity) };
+  return Object.keys(LABELS[surface]).map(key => ({ key, short: SHORT[key], label: LABELS[surface][key], value: values[key] }));
 }
 
-/* One segment per signal. Measured segments share the width by value; an unmeasured one
-   keeps a fixed hatched slot, so "not measured" never reads as zero. */
-const UNMEASURED_SHARE = 12;
+/* The label of the strongest measured signal, so a card's one-line reason names the same
+   signal the strip shows fullest. */
+export function strongestSignal(item) {
+  const measured = signalsOf(item).filter(s => s.value !== null && s.value > 0);
+  return measured.length ? measured.reduce((a, b) => (b.value > a.value ? b : a)).label : null;
+}
+
+function valueText(value) { return value === null ? "not measured" : formatNumber(value, 2, true); }
+function fillOf(value) { return Math.round(Math.max(0, Math.min(1, value)) * 100) + "%"; }
+
+/* One equal slot per signal, filled to its own magnitude: zero is an empty slot, not
+   measured is hatched. With nothing measured at all the strip is a quiet line instead. */
 export function evidenceStrip(item, details, { legend = false } = {}) {
   const signals = signalsOf(item);
-  const measured = signals.filter(([, , value]) => value !== null);
-  const total = measured.reduce((sum, [, , value]) => sum + Math.max(0, value), 0);
-  const room = 100 - (signals.length - measured.length) * UNMEASURED_SHARE;
-  const words = signals.map(([, label, value]) => label + " " + (value === null ? "not measured" : formatNumber(value, 2, true))).join(", ");
+  if (signals.every(s => s.value === null)) {
+    const none = document.createElement("p");
+    none.className = "evidence-none";
+    none.textContent = "No measurements yet";
+    return none;
+  }
+  const words = signals.map(s => s.label + " " + valueText(s.value)).join(", ");
   const strip = document.createElement("button");
   strip.type = "button";
   strip.className = "evidence";
   strip.setAttribute("aria-label", "Evidence: " + words + ". Show why this pick");
   strip.title = words;
-  const bar = document.createElement("span");
-  bar.className = "evidence-bar";
-  signals.forEach(([key, , value]) => {
-    const segment = document.createElement("span");
-    segment.className = "evidence-seg is-" + key + (value === null ? " is-missing" : "");
-    const share = value === null ? UNMEASURED_SHARE : total > 0 ? room * Math.max(0, value) / total : room / measured.length;
-    segment.style.flexGrow = String(share);
-    bar.appendChild(segment);
+  signals.forEach(s => {
+    const slot = document.createElement("span");
+    slot.className = "evidence-slot is-" + s.key + (s.value === null ? " is-missing" : "");
+    const name = document.createElement("span");
+    name.className = "evidence-name";
+    name.textContent = legend ? s.short + " " + (s.value === null ? "\u2013" : formatNumber(s.value, 2, true)) : s.short;
+    const track = document.createElement("span");
+    track.className = "evidence-track";
+    if (s.value !== null) { const fill = document.createElement("span"); fill.style.width = fillOf(s.value); track.appendChild(fill); }
+    slot.append(track, name);
+    strip.appendChild(slot);
   });
-  strip.appendChild(bar);
-  if (legend) {
-    const keys = document.createElement("span");
-    keys.className = "evidence-legend";
-    signals.forEach(([key, label, value]) => {
-      const entry = document.createElement("span");
-      entry.className = "is-" + key + (value === null ? " is-missing" : "");
-      entry.textContent = label + " " + (value === null ? "not measured" : formatNumber(value, 2, true));
-      keys.appendChild(entry);
-    });
-    strip.appendChild(keys);
-  }
   strip.addEventListener("click", event => {
     event.stopPropagation();
+    details.__opener = strip;
     details.open = true;
+    if (narrow.matches) return;
     details.querySelector("summary").focus({ preventScroll: true });
     details.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   });
   return strip;
+}
+
+/* One shared modal sheet for narrow screens. It lives on <body>, outside the card's
+   containment, so it can cover the viewport; Esc closes it through the dialog. */
+let sheet = null, sheetOwner = null;
+function openSheet(details) {
+  if (!sheet) {
+    sheet = document.createElement("dialog");
+    sheet.className = "sheet";
+    sheet.setAttribute("aria-labelledby", "ai-sheet-title");
+    const head = document.createElement("div"); head.className = "sheet-head";
+    const title = document.createElement("h2"); title.id = "ai-sheet-title"; title.textContent = "Why this pick";
+    const close = document.createElement("button"); close.type = "button"; close.className = "sheet-close";
+    close.append(icon("close"), "Close");
+    close.onclick = () => sheet.close();
+    head.append(title, close);
+    const scroll = document.createElement("div"); scroll.className = "sheet-body";
+    sheet.append(head, scroll);
+    sheet.addEventListener("close", () => {
+      const owner = sheetOwner; sheetOwner = null;
+      if (!owner) return;
+      owner.details.open = false;
+      const back = owner.opener && owner.opener.isConnected ? owner.opener : owner.details.querySelector("summary");
+      if (back && back.isConnected) back.focus({ preventScroll: true });
+    });
+    document.body.appendChild(sheet);
+  }
+  sheetOwner = { details, opener: details.__opener || details.querySelector("summary") };
+  details.__opener = null;
+  sheet.querySelector(".sheet-body").replaceChildren(details.__body);
+  sheet.querySelector(".sheet-body").scrollTop = 0;
+  sheet.showModal();
+  sheet.querySelector(".sheet-close").focus();
 }
 
 export function explanation(item) {
@@ -64,7 +116,12 @@ export function explanation(item) {
   const summary = document.createElement("summary");
   summary.textContent = "Why this pick";
   details.appendChild(summary);
-  details.addEventListener("toggle", () => { if (details.open && !details.querySelector(".ai-explain-body")) details.appendChild(explanationBody(item)); });
+  details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    if (!details.__body) details.__body = explanationBody(item);
+    if (narrow.matches) openSheet(details);
+    else details.appendChild(details.__body);
+  });
   details.addEventListener("click", e => e.stopPropagation());
   return details;
 }
@@ -82,12 +139,8 @@ function explanationBody(item) {
   if (item.reason) {
     const lead = document.createElement("p"); lead.className = "ai-explain-lead"; lead.textContent = item.reason; body.appendChild(lead);
   }
-  const signals = [["Tags you like", number(c.tag_normalized)], ["Looks like what you watch", number(c.visual_similarity)],
-    ["Sounds like what you watch", number(c.sound_similarity)], ["Voice like what you watch", number(c.voice_similarity)]];
-  if (c.tag_similarity != null) signals.unshift(["Shares tags with the seed", number(c.tag_similarity)]);
-  if (c.query_score != null) signals.unshift(["Matches your words", number(c.query_score)]);
   const bars = section("Signals");
-  signals.forEach(([label, value]) => {
+  signalsOf(item).forEach(({ label, value }) => {
     const line = document.createElement("div"); line.className = "ai-explain-bar";
     const name = document.createElement("span"); name.textContent = label;
     const track = document.createElement("span"); track.className = "ai-explain-track"; track.setAttribute("role", "img");
@@ -95,8 +148,8 @@ function explanationBody(item) {
     if (value === null) {
       track.setAttribute("aria-label", label + ": not measured"); shown.textContent = "not measured"; line.classList.add("is-missing");
     } else {
-      const fill = document.createElement("span"); fill.style.width = Math.round(Math.max(0, Math.min(1, value)) * 100) + "%"; track.appendChild(fill);
-      track.setAttribute("aria-label", label + ": " + formatNumber(value, 2, true)); shown.textContent = formatNumber(value, 2, true);
+      const fill = document.createElement("span"); fill.style.width = fillOf(value); track.appendChild(fill);
+      track.setAttribute("aria-label", label + ": " + valueText(value)); shown.textContent = valueText(value);
     }
     line.append(name, track, shown); bars.appendChild(line);
   });
