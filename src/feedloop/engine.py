@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from feedloop import catalog as catalog_module
-from feedloop import discovery, ledger, ranking, serving, tuning
+from feedloop import discovery, ledger, pipeline, profiles, ranking, serving, tuning
 from feedloop.slots import DEFAULT_SPACE_ROLES
 from feedloop.taste import DEFAULT_KINDS
 
@@ -33,10 +33,12 @@ VIEW_WINDOW_DAYS = 14
 DEFAULT_CONFIG = dict(
     half_life_days=21.0, min_watch_seconds=20.0, finished_ratio=0.45, abandon_ratio=0.15,
     dislike_min_watch_seconds=60.0, short_watch_ratio=0.5, history_limit=600, rating_strength=1.0,
-    dislike_strength=1.0, profile_tags=40, candidate_pool=500, bodyparts_weight=0.3, max_tag_share=0.35,
+    dislike_strength=1.0, profile_tags=24, candidate_pool=600, bodyparts_weight=0.3, max_tag_share=0.35,
     length_floor_seconds=120.0, diversity=0.35, calibration=0.25, cooldown_days=45.0, recovery_days=120.0,
     impression_discount=0.95, image_events_enabled=True, include_images=False, images_share=0.2,
     explore_slots=2, control_rate=1.0,
+    # v0.6.0: None derives the value from candidate_pool (per source: max(40, pool // 4); per tag: max(pool, 400))
+    source_budget=None, tag_candidate_limit=None,
 )
 DEFAULT_ATTRIBUTION = {"window_s": ledger.ATTRIBUTION_WINDOW_S, "policy_revision": ledger.ATTRIBUTION_POLICY_REVISION,
                        "min_advance_s": ledger.ATTRIBUTION_MIN_ADVANCE_S}
@@ -158,6 +160,8 @@ class Engine:
         self._cursors: dict[str, dict] = {}
         self._pin_memo = catalog_module.SnapshotMemo()
         self._views_memo = None
+        self._matrices = pipeline.KindMatrices(spaces)
+        self._windows_cache = profiles.TTLCache("best_windows", 3600.0)
 
     # ----------------------------------------------------------------- facts
     @property
@@ -227,13 +231,12 @@ class Engine:
                    "occurred_at": _iso(row["occurred_at"]), "known_at": _iso(max(row["received_at"], row["occurred_at"])), "value": None}
                   for row in evidence["events"] if row["event_type"] == "viewed" and row["kind"] in self.kinds]
         revision = _digest(sorted((f"{kind}:{item_id}", n) for (kind, item_id), n in counts["counts"].items()))
-        return {"status": "ok", "events": events, "revision": revision}
+        return {"status": "ok", "events": events, "revision": revision, "counts": dict(counts["counts"])}
 
     def _committed_revisions(self, signals, views):
         """The generation tokens a build must see unchanged before it may publish."""
-        # a preparer may read any committed space (a paired means space included), so all of them are fenced
-        names = set(self.spaces.spaces()) if self.prepare_feed is not None else set(self.spaces.spaces()) & set(self.roles.values())
-        spaces = {space: self.spaces.revision(space) for space in sorted(names)}
+        # the preparation (native or a host's) may read any committed space, so all of them are fenced
+        spaces = {space: self.spaces.revision(space) for space in sorted(set(self.spaces.spaces()))}
         return {"features": _digest(sorted(spaces.items())) if all(v is not None for v in spaces.values()) else None,
                 "signals": _digest([signals["observed_at"], sorted((f"{k[0]}:{k[1]}", v) for k, v in signals["rows"].items())]),
                 "views": views["revision"]}
@@ -387,14 +390,19 @@ class Engine:
             {k: (None if v is None else list(v)) for k, v in context["eligible_ids"].items()},
             "filter_identity": context["filter_identity"], "experiment": experiment}, sort_keys=True, allow_nan=False))
         rank_config = {**config, "experiment": generating_config["experiment"] and {**experiment}}
+        prepare = None
         if self.prepare_feed is None:
-            ranked = ranking.rank(inputs, context={**content_context, "limit": len(keys), "offset": 0}, config=rank_config, seed=seed, kinds=self.kinds)
-            # the dominant category the source recorded per served item: the profile weights that
-            # actually ranked this generation over the item's own tag seconds and categories
-            weights = dict(ranked["admission_trace"]["invariants"]["profile"]["weights"])
-        else:
-            ranked = self._prepared_rank(content_context, rank_config, seed, requested_kinds, pin, limit)
-            weights = dict((ranked["profile"] or {}).get("weights") or {})
+            features = {(f["kind"], f["id"]): f for f in feature_rows}
+
+            def prepare(**request):
+                return pipeline.prepare(**request, signals=signals, rows=rows, features=features, links=self.links, views=views,
+                                        now=now, matrices=self._matrices, windows_read=self._read_windows,
+                                        windows_revision=self._windows_revision, windows_cache=self._windows_cache,
+                                        primary=self.primary, secondary=self.kinds[1] if len(self.kinds) > 1 else None)
+        ranked = self._prepared_rank(content_context, rank_config, seed, requested_kinds, pin, limit, prepare=prepare)
+        # the dominant category the source recorded per served item: the profile weights that
+        # actually ranked this generation over the item's own tag seconds and categories
+        weights = dict((ranked["profile"] or {}).get("weights") or {})
         categories, vectors = {}, {}
         for feature in feature_rows:
             categories.update({int(t): str(c).lower() for t, c in feature["tag_categories"].items()})
@@ -435,7 +443,35 @@ class Engine:
         response["source_counts"], response["fallback"] = ranked["source_counts"], ranked["fallback"]
         return response
 
-    def _prepared_rank(self, context, config, seed, kinds, pin, page_size):
+    def _windows_revision(self):
+        revisions = [self.spaces.revision(self.roles[role]) for role in ("visual", "semantic")]
+        return None if None in revisions else _digest(revisions)
+
+    def _read_windows(self, query, ids):
+        """{id: t} of each primary item's frame window best matching query in the paired look space."""
+        wanted, halves = {(self.primary, int(i)) for i in ids}, {}
+        spaces = (self.roles["visual"], self.roles["semantic"])
+        for space in spaces:
+            loaded = self.spaces.windows(space)
+            if loaded is None:
+                return {}
+            keys, times, matrix = loaded
+            for row, key in enumerate(keys):
+                if tuple(key) in wanted:
+                    vector = matrix[row].astype(np.float32)
+                    length = float(np.linalg.norm(vector))
+                    if length > 0:
+                        halves.setdefault((key[1], float(times[row])), {})[space] = vector / length
+        best = {}
+        for (sid, t), pair in halves.items():
+            if len(pair) != 2:
+                continue
+            score = float(np.concatenate([pair[spaces[0]], pair[spaces[1]]]) / np.sqrt(2.0) @ query)
+            if sid not in best or score > best[sid][1]:
+                best[sid] = (t, score)
+        return {sid: t for sid, (t, _score) in best.items()}
+
+    def _prepared_rank(self, context, config, seed, kinds, pin, page_size, prepare=None):
         """The host's prepared components through the public rank_page, unchanged.
 
         prepare_feed(context=, config=, seed=, kinds=, catalog=) returns the rank_page inputs:
@@ -445,7 +481,7 @@ class Engine:
         windows(keys) -> {key: t}. Every candidate must be a pinned catalog key the request may
         serve; the seeds must be the request's seeds.
         """
-        prep = self.prepare_feed(context=copy.deepcopy(context), config=copy.deepcopy(config), seed=seed,
+        prep = (prepare or self.prepare_feed)(context=copy.deepcopy(context), config=copy.deepcopy(config), seed=seed,
                                  kinds=tuple(kinds), catalog=copy.deepcopy(pin))
         intent, allowed = context["intent"], context["eligible_ids"]
         seeds = [(self.primary, sid) for sid in intent[f"seed_{self.primary}_ids"]]
@@ -571,6 +607,8 @@ class Engine:
             self._cursors.clear()
             self._pin_memo.clear()
             self._views_memo = None
+        self._matrices = pipeline.KindMatrices(self.spaces)
+        self._windows_cache = profiles.TTLCache("best_windows", 3600.0)
         self.tuner.invalidate()
 
     # ------------------------------------------------------------ attribution

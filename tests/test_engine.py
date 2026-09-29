@@ -207,7 +207,7 @@ def test_changed_revisions_block_publication_and_first_page_reuse(tmp_path, cloc
     now[0] = 100.0
     # a feature revision that moves while the vectors hydrate (spaces.matrix), or during the
     # ranking itself: unstable provenance, no cursor published, the emitted cursor is stale
-    original_matrix, original_rank = spaces.matrix, engine_module.ranking.rank
+    original_matrix, original_rank = spaces.matrix, engine_module.pipeline.prepare
     def moving_matrix(space):
         spaces.revisions["visual"] = 2
         return original_matrix(space)
@@ -215,8 +215,8 @@ def test_changed_revisions_block_publication_and_first_page_reuse(tmp_path, cloc
         spaces.revisions["visual"] = 3
         return original_rank(*args, **kwargs)
     for moved, restore in ((lambda: setattr(spaces, "matrix", moving_matrix), lambda: setattr(spaces, "matrix", original_matrix)),
-                           (lambda: monkeypatch.setattr(engine_module.ranking, "rank", moving_rank),
-                            lambda: monkeypatch.setattr(engine_module.ranking, "rank", original_rank))):
+                           (lambda: monkeypatch.setattr(engine_module.pipeline, "prepare", moving_rank),
+                            lambda: monkeypatch.setattr(engine_module.pipeline, "prepare", original_rank))):
         moved()
         unstable = eng.feed(REQUEST)
         restore()
@@ -227,8 +227,8 @@ def test_changed_revisions_block_publication_and_first_page_reuse(tmp_path, cloc
                           "cursor": unstable["pagination"]["next_cursor"]})
         assert (stale["status"], stale["error_code"]) == ("error", "stale_ranking_cursor")
     # a stable build publishes; a signal change between two first pages yields a new generation
-    ranks = Mock(wraps=engine_module.ranking.rank)
-    monkeypatch.setattr(engine_module.ranking, "rank", ranks)
+    ranks = Mock(wraps=engine_module.pipeline.prepare)
+    monkeypatch.setattr(engine_module.pipeline, "prepare", ranks)
     first = eng.feed(REQUEST)
     assert first["status"] == "ok", first
     generation = first["items"][0]["provenance"]["ranking_generation_id"]

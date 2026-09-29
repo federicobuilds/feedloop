@@ -441,8 +441,8 @@ class TestLiveServingContracts:
     def test_real_normalized_ranker_pages_commit_deliveries_without_loss_or_duplicates(self, tmp_path, clock, monkeypatch):
         now, fake = clock
         eng = make_engine(tmp_path, fake)
-        ranks = Mock(wraps=engine_module.ranking.rank)
-        monkeypatch.setattr(engine_module.ranking, "rank", ranks)
+        ranks = Mock(wraps=engine_module.pipeline.prepare)
+        monkeypatch.setattr(engine_module.pipeline, "prepare", ranks)
         body, pages = dict(LIVE), []
         for page_number in range(4):
             data = eng.feed(body)
