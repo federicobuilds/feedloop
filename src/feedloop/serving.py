@@ -165,6 +165,11 @@ def feed_time(value, duration):
     return value if math.isfinite(value) and math.isfinite(duration) and 0 <= value < duration else None
 
 
+FALLBACK_REASON = "New to you"
+# the taste-profile summary fields the Engine page reads; ranking internals such as weights stay server-side
+PROFILE_SUMMARY_KEYS = ("reason", "profile_tags", "positive_tags", "negative_tags", "corpus_items", "watch_evidence_s", "explicit_only_items")
+
+
 def feed_reason(explanation, names: Mapping[int, str]) -> str:
     if not explanation:
         return ""
@@ -172,6 +177,8 @@ def feed_reason(explanation, names: Mapping[int, str]) -> str:
         return "placebo pick"
     if explanation.get("explore"):
         return "outside your usual"
+    if explanation.get("fallback") or "fallback" in (explanation.get("sources") or ()):
+        return FALLBACK_REASON
     bits = []
     top = sorted(explanation.get("tag_contributions") or [], key=lambda r: -abs(r.get("contribution", 0.0)))
     if top:
@@ -203,15 +210,18 @@ def ranking_response(items, total, has_more, offset, *, next_offset=None, kinds=
             "ranking": provenance}
 
 
-def continue_cursor(snapshot, cursor, *, offset, limit, cursor_context, reset_generation, now, current, kinds=DEFAULT_KINDS):
+def continue_cursor(snapshot, cursor, *, offset, limit, cursor_context, reset_generation, now, current, features_revision,
+                    kinds=DEFAULT_KINDS):
     """Skip-aware continuation over the frozen generation.
 
     ``current`` supplies today's constraints: ``present`` keys, ``groups`` (verified
     duplicate groups), ``allowed`` per kind, and ``excluded`` keys. Newly ineligible
     items are skipped without rebuilding or reordering; the offset advances by
-    original positions, not returned count."""
+    original positions, not returned count. A frozen generation whose committed feature
+    revision differs from ``features_revision`` is refused like a lost generation."""
     if (snapshot is None or snapshot["context"] != cursor_context or snapshot["reset_generation"] != reset_generation
-            or now - snapshot["created_at"] > CURSOR_TTL_S or snapshot["generation_id"] != cursor["generation_id"]):
+            or now - snapshot["created_at"] > CURSOR_TTL_S or snapshot["generation_id"] != cursor["generation_id"]
+            or snapshot["revisions"]["features"] != features_revision):
         raise ValueError("stale_ranking_cursor")
     rows = snapshot["items"]
     if not 0 < offset <= len(rows):
@@ -229,8 +239,9 @@ def continue_cursor(snapshot, cursor, *, offset, limit, cursor_context, reset_ge
     positions = [index for index in range(offset, len(rows)) if key(rows[index]) in available]
     selected = positions[:limit or 20]
     page = copy.deepcopy([rows[index] for index in selected])
-    return ranking_response(page, offset + len(positions), len(positions) > len(selected), offset,
-                            next_offset=selected[-1] + 1 if selected else len(rows), kinds=kinds)
+    return {**ranking_response(page, offset + len(positions), len(positions) > len(selected), offset,
+                               next_offset=selected[-1] + 1 if selected else len(rows), kinds=kinds),
+            "profile": copy.deepcopy(snapshot.get("profile") or {})}
 
 
 def first_page(snapshot, *, limit, current, kinds=DEFAULT_KINDS):
@@ -246,8 +257,9 @@ def first_page(snapshot, *, limit, current, kinds=DEFAULT_KINDS):
     positions = [index for index in range(len(rows)) if key(rows[index]) in available]
     selected = positions[:limit or 20]
     page = copy.deepcopy([rows[index] for index in selected])
-    return ranking_response(page, len(positions), len(positions) > len(selected), 0,
-                            next_offset=selected[-1] + 1 if selected else len(rows), kinds=kinds)
+    return {**ranking_response(page, len(positions), len(positions) > len(selected), 0,
+                               next_offset=selected[-1] + 1 if selected else len(rows), kinds=kinds),
+            "profile": copy.deepcopy(snapshot.get("profile") or {})}
 
 
 def build_feed(ranked, *, names, offset, kinds=DEFAULT_KINDS):
@@ -265,7 +277,8 @@ def build_feed(ranked, *, names, offset, kinds=DEFAULT_KINDS):
         shared = {"request_id": None, "served_item_id": None, "viewed_event_id": None, "source_rank": sc.get("source_rank", m.get("position"))}
         if sc["kind"] != primary:
             items.append({**sc, **shared, "kind": sc["kind"], "id": int(sc["id"]), "score": sc.get("score"),
-                          "title": sc.get("title") or f"Item {sc['id']}", "reason": sc.get("reason") or "Serving explanation unavailable",
+                          "title": sc.get("title") or f"Item {sc['id']}",
+                          "reason": sc.get("reason") or feed_reason(m, names) or "Serving explanation unavailable",
                           "duration": 0, "best_t": None, "category": sc["kind"], "explore": bool(m.get("explore")),
                           "control": bool(m.get("control")), "rating100": sc.get("rating100")})
             continue
@@ -290,7 +303,8 @@ def build_feed(ranked, *, names, offset, kinds=DEFAULT_KINDS):
             "components": components, "pagination": {"offset": offset, "has_more": bool(has_more),
                                                        "next_offset": next_offset if has_more else None,
                                                        "next_cursor": next_cursor if has_more else None},
-            "items": items, "total": d.get("total"), "profile": ((d["items"] or [{}])[0].get("explanation") or {}).get("profile", {})}
+            "items": items, "total": d.get("total"),
+            "profile": {k: v for k, v in (d.get("profile") or {}).items() if k in PROFILE_SUMMARY_KEYS}}
 
 
 def serve_feed(result, payload, *, ledger_path, resolve_eligibility, clock=time.time, kinds=DEFAULT_KINDS, recommender="feed"):

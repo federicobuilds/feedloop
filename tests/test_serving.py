@@ -222,24 +222,28 @@ class TestFeedContracts:
         generation = "b" * 64
         frozen = [{"kind": "video", "id": i, "score": 1 - i / 10, "provenance": {"ranking_generation_id": generation}} for i in range(1, 7)]
         snapshot = {"items": frozen, "catalog": {"groups": {}}, "context": ("ctx",), "created_at": 0.0, "reset_generation": 0,
-                    "generation_id": generation}
+                    "generation_id": generation, "revisions": {"features": "f1"}}
         current = {"present": {("video", i) for i in range(1, 7)}, "groups": {}, "allowed": {"video": None, "image": None},
                    "excluded": {("video", 2), ("video", 3)}}
         page = serving.continue_cursor(snapshot, {"generation_id": generation, "offset": 1, "after": "video:1"}, offset=1, limit=1,
-                                       cursor_context=("ctx",), reset_generation=0, now=10.0, current=current)
+                                       cursor_context=("ctx",), reset_generation=0, now=10.0, current=current, features_revision="f1")
         assert [i["id"] for i in page["items"]] == [4]
         assert page["next_offset"] == 4 and page["next_cursor"]["after"] == "video:4" and page["has_more"]
         # a stale, mismatched or expired snapshot is explicit
         for bad in ({"generation_id": "c" * 64, "offset": 1, "after": "video:1"}, {"generation_id": generation, "offset": 1, "after": "video:9"},
                     {"generation_id": generation, "offset": 9, "after": "video:6"}):
             with pytest.raises(ValueError, match="stale_ranking_cursor"):
-                serving.continue_cursor(snapshot, bad, offset=bad["offset"], limit=1, cursor_context=("ctx",), reset_generation=0, now=10.0, current=current)
+                serving.continue_cursor(snapshot, bad, offset=bad["offset"], limit=1, cursor_context=("ctx",), reset_generation=0, now=10.0, current=current, features_revision="f1")
         with pytest.raises(ValueError, match="stale_ranking_cursor"):
             serving.continue_cursor(snapshot, {"generation_id": generation, "offset": 1, "after": "video:1"}, offset=1, limit=1,
-                                    cursor_context=("ctx",), reset_generation=1, now=10.0, current=current)
+                                    cursor_context=("ctx",), reset_generation=1, now=10.0, current=current, features_revision="f1")
         with pytest.raises(ValueError, match="stale_ranking_cursor"):
             serving.continue_cursor(snapshot, {"generation_id": generation, "offset": 1, "after": "video:1"}, offset=1, limit=1,
-                                    cursor_context=("ctx",), reset_generation=0, now=serving.CURSOR_TTL_S + 1, current=current)
+                                    cursor_context=("ctx",), reset_generation=0, now=serving.CURSOR_TTL_S + 1, current=current, features_revision="f1")
+        # changed committed features refuse the frozen generation like a lost one
+        with pytest.raises(ValueError, match="stale_ranking_cursor"):
+            serving.continue_cursor(snapshot, {"generation_id": generation, "offset": 1, "after": "video:1"}, offset=1, limit=1,
+                                    cursor_context=("ctx",), reset_generation=0, now=10.0, current=current, features_revision="f2")
 
 
 # ---------------------------------------------------- DeliveryAdapterContracts
@@ -619,3 +623,10 @@ class TestDashboardSharedContracts:
         eng.tuner.cumulative_facts.assert_not_called()
         assert eng.tuner.summarize_trials.call_args.kwargs["verdict"] is verdict
         assert eng.tuner.summarize_trials.call_args.kwargs["trial_reward"] is reward
+
+
+def test_fallback_picks_carry_one_stable_reason():  # 2026-09-29 (F-2)
+    fallback = {"sources": ["fallback"], "score": 0.0, "fallback": "no_positive_feature_match", "strength": "weak"}
+    assert serving.feed_reason(fallback, {}) == serving.FALLBACK_REASON == "New to you"
+    result = serving.build_feed({"items": [{"kind": "image", "id": 3, "explanation": fallback}], "has_more": False}, names={}, offset=0)
+    assert result["items"][0]["reason"] == "New to you"

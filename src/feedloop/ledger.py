@@ -518,10 +518,15 @@ def import_watch_capture(db_path, *, batch, kinds=DEFAULT_KINDS):
     content_hash = hashlib.sha256(_json(batch).encode()).hexdigest()
     outcomes, quarantined = 0, 0
     with _connection(db_path, write=True) as conn:
-        old = conn.execute("SELECT content_hash FROM rec_watch_capture_imports WHERE source_id=? AND capture_id=?",
+        old = conn.execute("SELECT content_hash,received_at FROM rec_watch_capture_imports WHERE source_id=? AND capture_id=?",
                            (batch["source_id"], batch["capture_id"])).fetchone()
         if old:
-            _require(old[0] == content_hash, "watch_receipt_conflict")
+            # 2026-09-29: a retry carries a fresh server received_at; compare the content under
+            # the original receipt time so an identical retry is a duplicate, not a conflict
+            # 1.0 == 1 in a set, so the stored REAL and its integer spelling are kept apart in a tuple
+            originals = (old[1], int(old[1])) if float(old[1]).is_integer() else (old[1],)
+            _require(old[0] in {hashlib.sha256(_json({**batch, "received_at": t}).encode()).hexdigest() for t in originals},
+                     "watch_receipt_conflict")
             return {"status": "duplicate", "outcomes": 0, "quarantined": 0}
         cutover = conn.execute("SELECT cutover_ts FROM rec_metadata").fetchone()[0]
         _require(cutover <= batch["received_at"] <= time.time(), "watch_receipt_clock_invalid")
@@ -1215,6 +1220,38 @@ def read_view_counts(db_path: str, *, since_ts: float, through_ts: float,
                   AND (? IS NULL OR r.recommender=?) GROUP BY e.kind,e.item_id""",
                 (since_ts, through_ts, through_ts, recommender, recommender)).fetchall()
         return {"status": "ok", "counts": {(r[0], r[1]): r[2] for r in rows}}
+    except ContractError as exc:
+        return _unavailable(str(exc))
+
+
+_QUALIFIED_VIEWS_SQL = """SELECT event_id,kind,item_id,occurred_at,received_at FROM rec_events INDEXED BY rec_one_view
+    WHERE event_type='viewed' AND parent_id IS NOT NULL AND occurred_at>=? AND occurred_at<=? AND received_at<=?
+    ORDER BY occurred_at,rowid"""
+
+
+def read_qualified_views(db_path: str, *, since_ts: float, through_ts: float) -> dict[str, Any]:
+    """Viewed events inside [since_ts, through_ts] known by through_ts, without decoding payloads.
+    Every view has a served parent, so the rec_one_view partial index covers all of them."""
+    _number(since_ts)
+    _number(through_ts)
+    _require(since_ts <= through_ts, "invalid_window")
+    try:
+        with _connection(db_path) as conn:
+            rows = conn.execute(_QUALIFIED_VIEWS_SQL, (since_ts, through_ts, through_ts)).fetchall()
+        return {"status": "ok", "events": [dict(r) for r in rows]}
+    except ContractError as exc:
+        return _unavailable(str(exc))
+
+
+def watch_capture_status(db_path: str, *, source_id: str, capture_id: str) -> dict[str, Any]:
+    """The import status of one watch capture receipt, or not_found."""
+    _text(source_id)
+    _text(capture_id)
+    try:
+        with _connection(db_path) as conn:
+            row = conn.execute("SELECT status,reason,received_at,imported_at FROM rec_watch_capture_imports "
+                               "WHERE source_id=? AND capture_id=?", (source_id, capture_id)).fetchone()
+        return dict(row) if row else {"status": "not_found"}
     except ContractError as exc:
         return _unavailable(str(exc))
 

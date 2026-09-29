@@ -178,9 +178,15 @@ class Engine:
         return ledger.read_eligibility_snapshot(self.ledger_path, snapshot_id=snapshot_id)["eligible_ids"]
 
     def cumulative_facts(self, items, cutoff_ts):
-        """Current Catalog/Signals values labelled with the exact evidence cutoff."""
+        """Current Catalog/Signals values at the exact evidence cutoff. Signals.read is current
+        data with no as-of view, so rows observed after the cutoff leave its facts unavailable."""
         keys = sorted(set(items))
-        rows = self.signals.read(keys)["rows"] if keys else {}
+        if not keys:
+            return {"cutoff_ts": cutoff_ts, "items": {}}
+        current = self.signals.read(keys)
+        if float(current["observed_at"]) > cutoff_ts:
+            return {"cutoff_ts": cutoff_ts, "items": {}}
+        rows = current["rows"]
         catalog_rows = self.sources.rows(keys)
         facts = {}
         for key in keys:
@@ -224,12 +230,12 @@ class Engine:
         counts = ledger.read_view_counts(self.ledger_path, since_ts=since, through_ts=now)
         if counts["status"] != "ok":
             return {"status": counts["status"], "events": [], "revision": None}
-        evidence = ledger.read_evidence(self.ledger_path, since_ts=since, through_ts=now)
-        if evidence.get("status") != "ok":
-            return {"status": evidence.get("status", "unavailable"), "events": [], "revision": None}
+        qualified = ledger.read_qualified_views(self.ledger_path, since_ts=since, through_ts=now)
+        if qualified.get("status") != "ok":
+            return {"status": qualified.get("status", "unavailable"), "events": [], "revision": None}
         events = [{"event_id": f"visible:{row['event_id']}", "type": "visible", "kind": row["kind"], "id": row["item_id"],
                    "occurred_at": _iso(row["occurred_at"]), "known_at": _iso(max(row["received_at"], row["occurred_at"])), "value": None}
-                  for row in evidence["events"] if row["event_type"] == "viewed" and row["kind"] in self.kinds]
+                  for row in qualified["events"] if row["kind"] in self.kinds]
         revision = _digest(sorted((f"{kind}:{item_id}", n) for (kind, item_id), n in counts["counts"].items()))
         return {"status": "ok", "events": events, "revision": revision, "counts": dict(counts["counts"])}
 
@@ -241,8 +247,14 @@ class Engine:
                 "signals": _digest([signals["observed_at"], sorted((f"{k[0]}:{k[1]}", v) for k, v in signals["rows"].items())]),
                 "views": views["revision"]}
 
-    def _ranking_inputs(self, keys, pin):
+    def _catalog_inputs(self, keys, pin):
         rows = self.sources.rows(keys)
+        catalog_rows = [{"kind": k, "id": i, "duration_s": float(rows[(k, i)].get("duration_s") or 0.0), "eligible": True,
+                         "duplicate_group": pin["groups"].get((k, i)), "duplicate_verified": (k, i) in pin["groups"]}
+                        for k, i in keys if (k, i) in rows]
+        return rows, catalog_rows
+
+    def _feature_rows(self, keys):
         features = self.catalog.features(keys)
         vectors = {}
         model_revisions = {}
@@ -254,9 +266,6 @@ class Engine:
             for key, vector in self.sources.means(space, keys).items():
                 vectors.setdefault(key, {})[space] = vector
         links = self.sources.trusted_links(keys)
-        catalog_rows = [{"kind": k, "id": i, "duration_s": float(rows[(k, i)].get("duration_s") or 0.0), "eligible": True,
-                         "duplicate_group": pin["groups"].get((k, i)), "duplicate_verified": (k, i) in pin["groups"]}
-                        for k, i in keys if (k, i) in rows]
         feature_rows = []
         for key in keys:
             f = features.get(key) or {}
@@ -264,7 +273,7 @@ class Engine:
                                  "watched_tag_seconds": f.get("watched_tag_seconds"), "tag_categories": dict(f.get("tag_categories") or {}),
                                  "vectors": vectors.get(key, {}), "identity_ids": sorted(links.get(key, ())),
                                  "revision": _digest(sorted((s, r) for s, r in model_revisions.items()), ), "model_revision": None})
-        return rows, catalog_rows, feature_rows, model_revisions
+        return feature_rows
 
     # ------------------------------------------------------------------ feed
     def feed(self, request, *, record_delivery=True):
@@ -341,9 +350,8 @@ class Engine:
         # commit the generation tokens before any feature hydration: a revision that moves while
         # vectors load is caught by the post-build comparison, never published under the new token
         committed = self._committed_revisions(signals, views)
-        rows, catalog_rows, feature_rows, model_revisions = self._ranking_inputs(keys, pin)
-        inputs = {"catalog": catalog_rows, "features": feature_rows,
-                  "evidence": self._evidence(signals["rows"], observed_at) + views["events"]}
+        rows, catalog_rows = self._catalog_inputs(keys, pin)
+        evidence = self._evidence(signals["rows"], observed_at) + views["events"]
         content_context = {**context, "now": _iso(now), "cutoff": _iso(now), "kinds": requested_kinds, "page_size": limit}
         # the frozen generation is bound to its session, page size, kinds, resolved knobs and
         # generating tag/seed intent; current membership and exclusions are rechecked per page
@@ -361,6 +369,8 @@ class Engine:
                                  and entry["revisions"] == committed
                                  and now - entry["created_at"] <= serving.CURSOR_TTL_S), None)
         if cursor is not None or snapshot is not None:
+            # 2026-09-29 (E-10): a frozen page needs no vectors; hard eligibility reads catalog and evidence only
+            inputs = {"catalog": catalog_rows, "features": [], "evidence": evidence}
             eligible = set(ranking.shared_hard_eligibility(inputs, context={**content_context, "limit": 0, "offset": 0},
                                                             config={**config, "experiment": None}, kinds=self.kinds))
             excluded = {key for key in keys if f"{key[0]}:{key[1]}" not in eligible}
@@ -368,8 +378,10 @@ class Engine:
                        "seeds": [(self.primary, sid) for sid in context["intent"][f"seed_{self.primary}_ids"]]}
             if cursor is not None:
                 return serving.continue_cursor(snapshot, cursor, offset=offset, limit=limit, cursor_context=cursor_context,
-                                               reset_generation=self.reset_generation, now=now, current=current, kinds=self.kinds)
+                                               reset_generation=self.reset_generation, now=now, current=current,
+                                               features_revision=committed["features"], kinds=self.kinds)
             return serving.first_page(snapshot, limit=limit, current=current, kinds=self.kinds)
+        feature_rows = self._feature_rows(keys)
         seed = random.getrandbits(63)
         generating_config = dict(config)
         generating_config["experiment"] = None
@@ -417,7 +429,7 @@ class Engine:
             category = (ranking.dominant_category(vectors.get(key, {}), categories, weights, config["bodyparts_weight"])
                         if key[0] == self.primary else key[0])
             explanation["dominant_category"] = category
-            items.append({"kind": key[0], "id": key[1], "score": row["score"], "explanation": explanation,
+            items.append({"kind": key[0], "id": key[1], "score": row["score"], "explanation": explanation, "best_t": row.get("best_t"),
                           "title": source.get("title"), "media_url": source.get("media_url"),
                           "duration_s": float(source.get("duration_s") or 0.0), "category": category, "source_rank": position})
         # completed-generation equality: every token read before the build must read the same after it
@@ -436,11 +448,12 @@ class Engine:
                     del self._cursors[oldest]
                 self._cursors[provenance["ranking_generation_id"]] = {
                     "items": copy.deepcopy(items), "catalog": pin, "context": cursor_context, "content": content_key, "created_at": now,
-                    "revisions": committed,
+                    "revisions": committed, "profile": copy.deepcopy(ranked["profile"] or {}),
                     "reset_generation": self.reset_generation, "generation_id": provenance["ranking_generation_id"]}
         page, total, has_more = ranking.page_items(items, offset=offset, limit=limit)
         response = serving.ranking_response(list(page), total, has_more, offset, kinds=self.kinds)
         response["source_counts"], response["fallback"] = ranked["source_counts"], ranked["fallback"]
+        response["profile"] = copy.deepcopy(ranked["profile"] or {})
         return response
 
     def _windows_revision(self):
@@ -520,7 +533,8 @@ class Engine:
             explanation = dict(row["explanation"])
             if row["key"] in times:
                 explanation["best_t"] = times[row["key"]]
-            items.append({"kind": row["key"][0], "id": row["key"][1], "score": float(row["score"]), "explanation": explanation})
+            items.append({"kind": row["key"][0], "id": row["key"][1], "score": float(row["score"]), "explanation": explanation,
+                          "best_t": times.get(row["key"])})
         source_counts = dict(prep["source_counts"])
         source_counts["fallback"] = len(items) if page["fallback_active"] else 0
         return {"items": items, "profile": prep["profile"], "source_counts": source_counts,

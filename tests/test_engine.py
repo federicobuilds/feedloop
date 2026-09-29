@@ -302,3 +302,101 @@ def test_feed_without_recording_delivery_writes_nothing(tmp_path, clock, monkeyp
     delivered = eng.feed(REQUEST)
     assert delivered["status"] == "ok" and [(i["kind"], i["id"]) for i in preview["items"]] == [(i["kind"], i["id"]) for i in delivered["items"]]
     assert counts(eng.ledger_path) != before[0][1]
+
+
+# ---------------------------------------------------------------- WP2b envelope and performance (2026-09-29)
+def _paging_engine(tmp_path, fake, now):
+    catalog = build_catalog()
+    keys = sorted(catalog.rows)
+    spaces = MemorySpaces({"visual": (keys, unit_rows(len(keys), 16, 1)), "semvisual": (keys, unit_rows(len(keys), 16, 2))})
+    signals = MemorySignals({("video", i): {"rating": None, "engagement_count": 0,
+                                            "watch": {"watched_s": 500.0, "last_at": 40.0 - i, "visit_days": [0], "intervals": [(0, 500)]}}
+                             for i in (1, 11, 21, 31)}, observed_at=50.0)
+    ledger_path, tuner_path = str(tmp_path / "events.sqlite"), str(tmp_path / "tuner.sqlite")
+    now[0] = 90.0
+    initialize_stores(ledger_path=ledger_path, tuner_path=tuner_path, cutover_ts=80.0, clock=fake)
+    eng = Engine(catalog=catalog, signals=signals, spaces=spaces, ledger_path=ledger_path, tuner_path=tuner_path, clock=fake,
+                 config={"explore_slots": 0, "control_rate": 0.0, "cooldown_days": 0.0})
+    now[0] = 100.0
+    return eng, signals, spaces
+
+
+PAGE = {"limit": 5, "images": False, "surface": "feed", "session_id": "s1", "request_id": "r1", "client_request_id": "c1"}
+
+
+def test_cumulative_facts_observed_after_the_cutoff_are_unavailable(tmp_path, clock):
+    now, fake = clock
+    eng, signals, _spaces = _paging_engine(tmp_path, fake, now)
+    assert eng.cumulative_facts({("video", 1)}, 60.0)["items"][("video", 1)]["watched_s"] == 500.0
+    # a rating observed at 70 is current data, not the state at the older cutoff 60
+    signals.rows[("video", 1)]["rating"] = 90
+    signals.observed_at = 70.0
+    assert eng.cumulative_facts({("video", 1)}, 60.0) == {"cutoff_ts": 60.0, "items": {}}
+    assert eng.cumulative_facts({("video", 1)}, 70.0)["items"][("video", 1)]["rating"] == 90
+
+
+def test_continuation_serves_frozen_page_best_t_and_profile_without_hydrating_means(tmp_path, clock, monkeypatch):
+    now, fake = clock
+    eng, _signals, _spaces = _paging_engine(tmp_path, fake, now)
+    prepare = engine_module.pipeline.prepare
+    monkeypatch.setattr(engine_module.pipeline, "prepare", lambda **kw: {**prepare(**kw), "windows": lambda keys: {k: 7.0 for k in keys}})
+    first = eng.feed(PAGE, record_delivery=False)
+    assert first["status"] == "ok" and first["pagination"]["has_more"], first
+    assert all(item["best_t"] == 7.0 for item in first["items"])
+    assert first["profile"] and "weights" not in first["profile"]
+    cursor = first["pagination"]["next_cursor"]
+    frozen = eng._cursors[cursor["generation_id"]]["items"]
+    means = Mock(wraps=eng.sources.means)
+    monkeypatch.setattr(eng.sources, "means", means)
+    now[0] = 101.0
+    second = eng.feed({**PAGE, "request_id": "r2", "client_request_id": "c2", "offset": cursor["offset"], "cursor": cursor},
+                      record_delivery=False)
+    assert second["status"] == "ok", second
+    assert means.call_count == 0, "a continuation reuses the frozen page and hydrates no vectors"
+    assert [(i["kind"], i["id"]) for i in second["items"]] == [(i["kind"], i["id"]) for i in frozen[cursor["offset"]:cursor["offset"] + 5]]
+    assert all(item["best_t"] == 7.0 for item in second["items"]) and second["profile"] == first["profile"]
+
+
+def test_continuation_refuses_changed_feature_revisions(tmp_path, clock):
+    now, fake = clock
+    eng, _signals, spaces = _paging_engine(tmp_path, fake, now)
+    first = eng.feed(PAGE, record_delivery=False)
+    cursor = first["pagination"]["next_cursor"]
+    spaces.revisions["visual"] = 2
+    now[0] = 101.0
+    page = eng.feed({**PAGE, "request_id": "r2", "client_request_id": "c2", "offset": cursor["offset"], "cursor": cursor},
+                    record_delivery=False)
+    assert page == {"items": [], "status": "error", "error_code": "stale_ranking_cursor"}
+
+
+def test_qualified_view_query_searches_the_view_index():
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    for sql in ledger._SCHEMA:
+        conn.execute(sql)
+    plan = " ".join(row[-1] for row in conn.execute("EXPLAIN QUERY PLAN " + ledger._QUALIFIED_VIEWS_SQL, (0.0, 1.0, 1.0)))
+    assert "SEARCH rec_events USING INDEX rec_one_view" in plan and "SCAN rec_events" not in plan, plan
+
+
+def test_watch_receipt_retry_with_a_fresh_received_at_is_a_duplicate(tmp_path, clock):
+    now, fake = clock
+    eng, _signals, _spaces = _paging_engine(tmp_path, fake, now)
+    page = eng.feed(PAGE)
+    item = page["items"][0]
+    now[0] = 101.0
+    viewed = eng.view({"client_event_id": "view-1", "session_id": "s1", "request_id": "r1", "served_item_id": item["served_item_id"],
+                       "surface": "feed", "position": item["source_rank"], "dwell_ms": 1200, "visible_fraction": 0.6,
+                       "visibility_policy": "foreground-60pct-1200ms-v1", "kind": "video", "item_id": item["id"], "occurred_at": 101.0})
+    row = {"id": "w-start", "stream_session_id": "st", "type": "view_start", "item_id": item["id"], "occurred_at": 101.0, "position": 0,
+           "duration": 600.0, "session_id": "s1", "viewed_event_id": viewed["event_id"], "previous_event_id": None,
+           "playback_rate": 1, "canonical_session_id": "s1"}
+    batch = {"capture_id": "cap-1", "source_id": "player", "received_at": 102.0, "source_revision": "rev", "status": "committed",
+             "reason": None, "events_json": [row]}
+    assert ledger.watch_capture_status(eng.ledger_path, source_id="player", capture_id="cap-1") == {"status": "not_found"}
+    now[0] = 103.0
+    assert eng.record([{"type": "watch_capture", "batch": batch}])[0]["status"] == "imported"
+    now[0] = 110.0
+    assert eng.record([{"type": "watch_capture", "batch": {**batch, "received_at": 110.0}}])[0]["status"] == "duplicate"
+    with pytest.raises(ledger.ContractError, match="watch_receipt_conflict"):
+        eng.record([{"type": "watch_capture", "batch": {**batch, "received_at": 110.0, "source_revision": "other"}}])
+    assert ledger.watch_capture_status(eng.ledger_path, source_id="player", capture_id="cap-1")["status"] == "imported"

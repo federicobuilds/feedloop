@@ -93,8 +93,8 @@ def test_views_read_the_ledger_once_per_feed_and_again_after_a_write(tmp_path, c
     now[0] = 90.0
     eng, _signals, _spaces = make_engine(tmp_path, fake, config={"impression_discount": 0.5})
     now[0] = 100.0
-    reads = Mock(wraps=ledger.read_evidence)
-    monkeypatch.setattr(ledger, "read_evidence", reads)
+    reads = Mock(wraps=ledger.read_qualified_views)
+    monkeypatch.setattr(ledger, "read_qualified_views", reads)
     page = eng.feed(REQUEST, record_delivery=False)
     assert page["status"] == "ok", page
     assert reads.call_count == 1, "the post-build fence reuses the pre-build read"
