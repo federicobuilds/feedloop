@@ -10,6 +10,9 @@ methods and never rank, attribute, journal or tune on their own.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from email.utils import formatdate
+import gzip
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -17,6 +20,7 @@ import mimetypes
 import os
 from pathlib import Path
 import secrets
+import socket
 import threading
 import time
 from typing import Any, Callable, Mapping
@@ -37,8 +41,36 @@ DENIED = {"mutation_credential_required": 401, "mutation_origin_denied": 403}
 DEMO_ATTRIBUTION = {"window_s": 5.0, "policy_revision": "demo-explicit-w5-v1", "min_advance_s": 0.0}
 DEMO_SPACE = "sidecar_text"
 DEMO_ROLES = {"visual": "visual", "semantic": DEMO_SPACE, "voice": "audioembed", "sound": "audiomix"}
+CHUNK_BYTES = 256 * 1024
+GZIP_MIN_BYTES = 1024
+GZIP_MAX_BYTES = 8 << 20
+COMPRESSIBLE_SUFFIXES = (".html", ".css", ".js", ".mjs", ".svg", ".json")
+WILDCARD_HOSTS = ("0.0.0.0", "")
 
-Response = tuple[int, list[tuple[str, str]], bytes]
+
+@dataclass(frozen=True)
+class FileBody:
+    """A byte range of one file; the transport writes it in bounded chunks after the headers."""
+    path: Path
+    start: int
+    length: int
+
+    def chunks(self):
+        with open(self.path, "rb") as handle:
+            handle.seek(self.start)
+            remaining = self.length
+            while remaining > 0:
+                chunk = handle.read(min(CHUNK_BYTES, remaining))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+                yield chunk
+
+    def read(self) -> bytes:
+        return b"".join(self.chunks())
+
+
+Response = tuple[int, list[tuple[str, str]], "bytes | FileBody"]
 
 
 def web_root() -> Path:
@@ -91,6 +123,21 @@ def build_engine(folder, state_dir, *, api_key=None, clock=time.time, attributio
     return source, engine
 
 
+def _accepts_gzip(accept_encoding: str) -> bool:
+    """True when a ``gzip`` token is listed without ``q=0`` (an explicit refusal)."""
+    for token in accept_encoding.lower().split(","):
+        name, *params = [part.strip() for part in token.split(";")]
+        if name != "gzip":
+            continue
+        q = next((param[2:].strip() for param in params if param.startswith("q=")), "1")
+        try:
+            if float(q) > 0:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
 class FeedloopApp:
     """Transport-independent request handling; ``handle`` maps one request to one response."""
 
@@ -122,6 +169,14 @@ class FeedloopApp:
 
     # -------------------------------------------------------------- routing
     def handle(self, method: str, target: str, headers: Mapping[str, str] | None = None, body: bytes | None = None) -> Response:
+        """``respond`` with any file body materialized (empty for HEAD), for in-process callers."""
+        status, extra, data = self.respond(method, target, headers, body)
+        if isinstance(data, FileBody):
+            data = b"" if method == "HEAD" else data.read()
+        return status, extra, data
+
+    def respond(self, method: str, target: str, headers: Mapping[str, str] | None = None, body: bytes | None = None) -> Response:
+        """One request to one response; a file is returned as a ``FileBody`` to be streamed."""
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         parts = urlsplit(target)
         path, query = unquote(parts.path), parse_qs(parts.query, keep_blank_values=True)
@@ -130,7 +185,7 @@ class FeedloopApp:
                 return self._api(method, path[5:], query, headers, body)
             if path.startswith(MEDIA_PREFIX):
                 return self._media(method, path[len(MEDIA_PREFIX):], headers)
-            return self._static(method, path)
+            return self._static(method, path, headers)
         except Exception:
             return _detail("internal_error", 500)
 
@@ -273,11 +328,23 @@ class FeedloopApp:
         except ledger.ContractError as exc:
             return _reply(200, {"status": "rejected", "error_code": str(exc), "stored_steps": 0, "capture_id": payload["capture_id"]})
         if receipt.get("status") == "duplicate":
-            return _reply(200, {**receipt, "stored_steps": 0, "capture_id": payload["capture_id"]})
-        if receipt.get("quarantined"):
+            # 2026-09-29: a retry after a failed source commit lands here; the source commit is
+            # idempotent by event id, so it is retried unless the original import was quarantined.
+            try:
+                original = ledger.watch_capture_status(self.engine.ledger_path, source_id=batch["source_id"], capture_id=batch["capture_id"]).get("status")
+            except Exception:
+                original = None
+            if original == "quarantined":
+                return _reply(200, {"status": "rejected", "error_code": "watch_view_or_session_unproven", "stored_steps": 0, "capture_id": payload["capture_id"]})
+            if original != "imported":
+                return _detail("sync_commit_unconfirmed", 503)
+        elif receipt.get("quarantined"):
             return _reply(200, {"status": "rejected", "error_code": "watch_view_or_session_unproven", "quarantined": receipt["quarantined"], "outcomes": receipt.get("outcomes", 0),
                                 "stored_steps": 0, "capture_id": payload["capture_id"]})
-        commit = self.source.commit_watch(rows, received_at=now)
+        try:
+            commit = self.source.commit_watch(rows, received_at=now)
+        except Exception:
+            commit = {}
         if commit.get("status") != "committed":
             return _detail("sync_commit_unconfirmed", 503)
         return _reply(200, {**receipt, "stored_steps": commit["stored"], "capture_id": payload["capture_id"]})
@@ -355,10 +422,11 @@ class FeedloopApp:
                 "visibility_policy": serving.VISIBILITY_POLICY, "automatic_tuning": bool(engine.tuner.automatic)}
 
     # --------------------------------------------------------------- files
-    def _file(self, root: Path, relative: str, headers=None) -> Response:
+    def _file(self, root: Path, relative: str, method: str, headers, *, media: bool) -> Response:
         """Serve one regular file under ``root``. Every component of the requested path is
         checked with ``lstat`` before resolution so a symlink anywhere in it is refused; the
-        resolved target must lie inside the resolved root and outside any hidden directory."""
+        resolved target must lie inside the resolved root and outside any hidden directory.
+        Responses revalidate by ETag; only small text web assets are ever gzipped."""
         parts = Path(relative).parts
         if not parts or any(part in ("", ".", "..") or part.startswith(".") for part in parts):
             return _detail("not_found", 404)
@@ -378,33 +446,48 @@ class FeedloopApp:
         if any(part.startswith(".") for part in inside.parts) or not candidate.is_file():
             return _detail("not_found", 404)
         mime = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        size = candidate.stat().st_size
+        stat = candidate.stat()
+        size = stat.st_size
+        etag = f'"{size:x}-{stat.st_mtime_ns:x}"'
+        compressible = not media and candidate.suffix.lower() in COMPRESSIBLE_SUFFIXES
+        wants_gzip = compressible and method == "GET" and _accepts_gzip(headers.get("accept-encoding", "")) and GZIP_MIN_BYTES < size <= GZIP_MAX_BYTES
+        cache = [("Cache-Control", "private, no-cache" if media else "no-cache"), ("Last-Modified", formatdate(stat.st_mtime, usegmt=True))]
+        if compressible:
+            cache.append(("Vary", "Accept-Encoding"))
         start, end = 0, size - 1
         status = 200
-        range_header = (headers or {}).get("range")
+        range_header = headers.get("range")
         if range_header and range_header.startswith("bytes=") and size:
             first, _, last = range_header[6:].partition("-")
-            if first.isdigit() and (last == "" or last.isdigit()):
+            if first == "" and last.isdigit():
+                if int(last) == 0:
+                    return 416, [("Content-Range", f"bytes */{size}")], b""
+                start, end, status = max(0, size - int(last)), size - 1, 206
+            elif first.isdigit() and (last == "" or last.isdigit()):
                 start, end = int(first), int(last) if last else size - 1
                 if start > end or start >= size:
                     return 416, [("Content-Range", f"bytes */{size}")], b""
                 end = min(end, size - 1)
                 status = 206
-        with open(candidate, "rb") as handle:
-            handle.seek(start)
-            data = handle.read(end - start + 1)
-        extra = [("Content-Type", mime), ("Accept-Ranges", "bytes"), ("Cache-Control", "no-store")]
+        gzipped = wants_gzip and status == 200
+        served_etag = etag[:-1] + '-gzip"' if gzipped else etag
+        offered = {tag.strip().removeprefix("W/") for tag in headers.get("if-none-match", "").split(",")}
+        if "*" in offered or etag in offered or etag[:-1] + '-gzip"' in offered:
+            return 304, [("ETag", served_etag)] + cache, b""
+        extra = [("Content-Type", mime), ("Accept-Ranges", "bytes"), ("ETag", served_etag)] + cache
+        if gzipped:
+            return status, extra + [("Content-Encoding", "gzip")], gzip.compress(candidate.read_bytes(), mtime=0)
         if status == 206:
             extra.append(("Content-Range", f"bytes {start}-{end}/{size}"))
-        return status, extra, data
+        return status, extra, FileBody(candidate, start, end - start + 1)
 
-    def _static(self, method, path) -> Response:
+    def _static(self, method, path, headers) -> Response:
         if method not in ("GET", "HEAD"):
             return _detail("method_not_allowed", 405)
         relative = path.lstrip("/") or "index.html"
         if relative in ("feed", "home", "search", "similar", "engine"):
             relative = "index.html"
-        return self._file(self.web_dir, relative)
+        return self._file(self.web_dir, relative, method, headers, media=False)
 
     def _media(self, method, relative, headers) -> Response:
         """Only catalogued media, addressed as ``/media/<kind>/<id>``. The state directory,
@@ -419,34 +502,55 @@ class FeedloopApp:
         path = self.source.media_path((kind, int(raw_id)))
         if path is None:
             return _detail("not_found", 404)
-        return self._file(self.source.folder, path.relative_to(self.source.folder).as_posix(), headers)
+        return self._file(self.source.folder, path.relative_to(self.source.folder).as_posix(), method, headers, media=True)
 
 
 class _Handler(BaseHTTPRequestHandler):
     app: FeedloopApp
     server_version = "feedloop"
     protocol_version = "HTTP/1.1"
+    timeout = 30
 
     def log_message(self, format, *args):
         pass
 
     def _dispatch(self):
-        length = self.headers.get("Content-Length")
-        body = b""
-        if length is not None:
-            if not length.isdigit() or int(length) > MAX_BODY_BYTES:
-                body = None
-                self.rfile.read(min(int(length), MAX_BODY_BYTES) if length.isdigit() else 0)
-            else:
-                body = self.rfile.read(int(length))
-        status, headers, data = self.app.handle(self.command, self.path, dict(self.headers.items()), body)
+        # A body that cannot be framed or bounded is refused and the connection closed
+        # without reading it, so no unread bytes are ever parsed as a following request.
+        lengths = self.headers.get_all("Content-Length") or []
+        refusal = None
+        if self.headers.get("Transfer-Encoding") is not None or len(lengths) > 1 or (lengths and not (lengths[0].isascii() and lengths[0].isdigit())):
+            refusal = _detail("invalid_request_framing", 400)
+        elif lengths and int(lengths[0]) > MAX_BODY_BYTES:
+            refusal = _detail("request_too_large", 413)
+        if refusal is not None:
+            self.close_connection = True
+            status, headers, data = refusal
+            self._send(status, headers + [("Connection", "close")], data)
+            return
+        body = self.rfile.read(int(lengths[0])) if lengths else b""
+        self._send(*self.app.respond(self.command, self.path, dict(self.headers.items()), body))
+
+    def _send(self, status, headers, data):
         self.send_response(status)
         for name, value in headers:
             self.send_header(name, value)
-        self.send_header("Content-Length", str(len(data)))
+        if not any(name.lower() == "cache-control" for name, _ in headers):
+            self.send_header("Cache-Control", "no-store")
+        if status != 304:
+            self.send_header("Content-Length", str(data.length if isinstance(data, FileBody) else len(data)))
         self.end_headers()
-        if self.command != "HEAD":
+        if self.command == "HEAD" or status == 304:
+            return
+        if not isinstance(data, FileBody):
             self.wfile.write(data)
+            return
+        written = 0
+        for chunk in data.chunks():
+            self.wfile.write(chunk)
+            written += len(chunk)
+        if written != data.length:
+            self.close_connection = True
 
     do_GET = do_POST = do_HEAD = _dispatch
 
@@ -460,8 +564,28 @@ def run_server(app: FeedloopApp, host: str = "127.0.0.1", port: int = 0) -> Thre
     return server
 
 
+def lan_addresses() -> list[str]:
+    """This machine's non-loopback IPv4 addresses. The UDP ``connect`` only selects a
+    route; it sends no packet."""
+    found = set()
+    try:
+        found.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            found.add(probe.getsockname()[0])
+    except OSError:
+        pass
+    return sorted(address for address in found if not address.startswith("127.") and address != "0.0.0.0")
+
+
 def origins_for(host: str, port: int):
-    names = {host, "127.0.0.1", "localhost"} if host in ("127.0.0.1", "localhost", "0.0.0.0", "") else {host}
+    if host in WILDCARD_HOSTS:
+        names = {"127.0.0.1", "localhost", *lan_addresses()}
+    else:
+        names = {host, "127.0.0.1", "localhost"} if host in ("127.0.0.1", "localhost") else {host}
     return tuple(sorted(f"http://{name}:{port}" for name in names))
 
 
@@ -469,5 +593,5 @@ def new_api_key() -> str:
     return secrets.token_urlsafe(24)
 
 
-__all__ = ["FeedloopApp", "build_engine", "run_server", "web_root", "origins_for", "new_api_key", "MAX_BODY_BYTES", "OBSERVATION_TTL_S",
+__all__ = ["FeedloopApp", "FileBody", "build_engine", "run_server", "web_root", "origins_for", "lan_addresses", "new_api_key", "WILDCARD_HOSTS", "MAX_BODY_BYTES", "OBSERVATION_TTL_S",
            "DEMO_ATTRIBUTION", "DEMO_SPACE", "DEMO_ROLES", "MEDIA_PREFIX", "API_KEY_HEADER"]

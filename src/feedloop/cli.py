@@ -9,13 +9,16 @@ runs an optional learned extractor and needs the ``[extract]`` extra.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 import sys
+import sqlite3
 import threading
 import time
 
-from feedloop.server.app import DEMO_ATTRIBUTION, FeedloopApp, build_engine, new_api_key, origins_for, run_server
+from feedloop import ledger
+from feedloop.server.app import DEMO_ATTRIBUTION, WILDCARD_HOSTS, FeedloopApp, build_engine, lan_addresses, new_api_key, origins_for, run_server
 
 
 FIXTURE_TAGS = ["amber", "cobalt", "granite", "linen", "moss", "slate", "umber", "willow"]
@@ -56,11 +59,31 @@ def _common(parser: argparse.ArgumentParser, *, state_default):
                         + (" (default: <folder>/.feedloop)" if state_default is None else ""))
 
 
+def _port(text):
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port: {text!r}") from None
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(f"port must be 0..65535, got {value}")
+    return value
+
+
+def _interval(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid interval: {text!r}") from None
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError(f"interval must be a finite number >= 0, got {text}")
+    return value
+
+
 def _serve_args(parser):
-    parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8765, help="port, 0 picks a free one (default 8765)")
+    parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1; 0.0.0.0 also allows this machine's LAN addresses)")
+    parser.add_argument("--port", type=_port, default=8765, help="port, 0 picks a free one (default 8765)")
     parser.add_argument("--api-key", default=None, help="shared key for mutations; default: FEEDLOOP_API_KEY or a fresh random key")
-    parser.add_argument("--tick-interval", type=float, default=None, help="seconds between attribution/tuner ticks (0 disables)")
+    parser.add_argument("--tick-interval", type=_interval, default=None, help="seconds between attribution/tuner ticks (0 disables)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,9 +126,13 @@ def _serve(args, *, initialize: bool, attribution):
         print("no stores under the state directory; run `feedloop demo` or `feedloop serve --init`", file=sys.stderr)
         return 2
     api_key = args.api_key or os.environ.get("FEEDLOOP_API_KEY") or new_api_key()
-    source, engine = build_engine(folder, state, initialize=initialize, attribution=attribution)
-    app = FeedloopApp(engine, api_key=api_key, allowed_origins=origins_for(args.host, args.port or 0), source=source)
-    server = run_server(app, args.host, args.port)
+    try:
+        source, engine = build_engine(folder, state, initialize=initialize, attribution=attribution)
+        app = FeedloopApp(engine, api_key=api_key, allowed_origins=origins_for(args.host, args.port or 0), source=source)
+        server = run_server(app, args.host, args.port)
+    except (OSError, sqlite3.Error, ledger.ContractError) as exc:
+        print(f"feedloop: error: {exc}", file=sys.stderr)
+        return 2
     port = server.server_address[1]
     app.allowed_origins = origins_for(args.host, port)
     interval = args.tick_interval if args.tick_interval is not None else (15.0 if initialize else 300.0)
@@ -119,8 +146,12 @@ def _serve(args, *, initialize: bool, attribution):
                 pass
     if interval > 0:
         threading.Thread(target=ticker, name="feedloop-tick", daemon=True).start()
-    print(f"feedloop serving {folder} on http://{args.host}:{port}/")
-    print(f"open http://{args.host}:{port}/#key={api_key}")
+    shown = "127.0.0.1" if args.host in WILDCARD_HOSTS else args.host
+    print(f"feedloop serving {folder} on http://{shown}:{port}/")
+    print(f"open http://{shown}:{port}/#key={api_key}")
+    if args.host in WILDCARD_HOSTS:
+        for address in lan_addresses():
+            print(f"on your network: http://{address}:{port}/#key={api_key}")
     print(f"attribution window {attribution['window_s'] if attribution else 'production'} s; tick every {interval} s; state in {state}")
     try:
         server.serve_forever()

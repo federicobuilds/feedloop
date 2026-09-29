@@ -72,3 +72,29 @@ def test_demo_serves_and_prints_the_keyed_address(tmp_path, monkeypatch, capsys)
     assert f"http://127.0.0.1:{port}/#key=abc" in out and "attribution window 5.0 s" in out
     # serve reuses the stores without re-initializing and refuses production stores it cannot find
     assert cli.main(["serve", str(media), "--state", str(tmp_path / "other")]) == 2
+
+
+def test_port_and_interval_are_validated(capsys):
+    for argv in (["--port", "70000"], ["--port", "-1"], ["--port", "http"], ["--tick-interval", "nan"], ["--tick-interval", "-1"], ["--tick-interval", "inf"]):
+        with pytest.raises(SystemExit) as exit_info:
+            cli.build_parser().parse_args(["demo", "folder", *argv])
+        assert exit_info.value.code == 2, argv
+    assert cli.build_parser().parse_args(["demo", "folder", "--port", "0", "--tick-interval", "0"]).port == 0
+
+
+def test_busy_port_is_one_error_line(tmp_path, capsys):
+    import socket
+    media = make_folder(tmp_path)
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        assert cli.main(["demo", str(media), "--state", str(tmp_path / "state"), "--port", str(port), "--tick-interval", "0"]) == 2
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("feedloop: error: ")
+
+
+def test_wildcard_host_prints_loopback_and_allows_lan_origins(monkeypatch):
+    monkeypatch.setattr(app_module, "lan_addresses", lambda: ["192.168.1.20"])
+    assert app_module.origins_for("0.0.0.0", 80) == ("http://127.0.0.1:80", "http://192.168.1.20:80", "http://localhost:80")
+    assert app_module.origins_for("127.0.0.1", 80) == ("http://127.0.0.1:80", "http://localhost:80")

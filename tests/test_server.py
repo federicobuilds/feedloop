@@ -1,12 +1,16 @@
 """HTTP boundary: authorization, bounded bodies, delivery versus observation, view and watch
 capture, feedback and undo, discovery, scorecard, tuner controls, static and media files."""
+import gzip
+import http.client
 import json
+import socket
 import threading
 import urllib.request
 
 import pytest
 
 from feedloop import ledger
+from feedloop.server import app as app_module
 from feedloop.server.app import MAX_BODY_BYTES, run_server
 from fl3_helpers import feed_request, make_app, request
 
@@ -266,13 +270,6 @@ def test_real_socket_roundtrip(ctx):
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
             assert json.loads(response.read()) == {"ok": True}
-        big = urllib.request.Request(f"http://127.0.0.1:{port}/api/feed", data=b"x" * (MAX_BODY_BYTES + 1), method="POST",
-                                     headers={"x-ai-api-key": ctx.key, "Origin": ctx.origin, "Content-Type": "application/json"})
-        try:
-            urllib.request.urlopen(big, timeout=5)
-            assert False, "oversized body accepted"
-        except urllib.error.HTTPError as error:
-            assert error.code == 413
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/media/video/1", timeout=5) as response:
             assert response.read() == (ctx.media / "sample-00.mp4").read_bytes()
     finally:
@@ -292,3 +289,110 @@ def test_served_items_carry_the_sidecar_reason(ctx):
     assert by_title["Sample 0"]["sidecar_reason"] is None
     _, observed = request(ctx, "GET", "/api/feed?limit=40&images=1&surface=feed&session_id=session-1", auth=False)
     assert {i["title"]: i["sidecar_reason"] for i in observed["items"]}[long_stem] == "sidecar_path_too_long"
+
+
+@pytest.fixture
+def live(ctx):
+    server = run_server(ctx.app, "127.0.0.1", 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server.server_address[1]
+    server.shutdown()
+    server.server_close()
+
+
+def raw_exchange(port, head: bytes) -> bytes:
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+        conn.sendall(head)
+        received = b""
+        while chunk := conn.recv(65536):
+            received += chunk
+    return received
+
+
+def test_head_streams_nothing_and_get_streams_the_file(ctx, live, monkeypatch):
+    video = (ctx.media / "sample-00.mp4").read_bytes()
+    monkeypatch.setattr(app_module.FileBody, "read", lambda self: (_ for _ in ()).throw(AssertionError("whole-file read")))
+    reads = []
+    real_chunks = app_module.FileBody.chunks
+    monkeypatch.setattr(app_module.FileBody, "chunks", lambda self: reads.append(self.length) or real_chunks(self))
+    conn = http.client.HTTPConnection("127.0.0.1", live, timeout=5)
+    conn.request("HEAD", "/media/video/1")
+    response = conn.getresponse()
+    assert response.status == 200 and int(response.getheader("Content-Length")) == len(video) and response.read() == b"" and reads == []
+    conn.request("GET", "/media/video/1")
+    response = conn.getresponse()
+    assert response.read() == video and reads == [len(video)] and response.getheader("Cache-Control") == "private, no-cache"
+    conn.close()
+
+
+def test_ranges_are_bounded_including_suffix_ranges(ctx):
+    video = (ctx.media / "sample-00.mp4").read_bytes()
+    status, headers, body = ctx.app.respond("GET", "/media/video/1", {"range": "bytes=0-9"})
+    assert status == 206 and body.length == 10 and body.read() == video[:10] and dict(headers)["Content-Range"] == f"bytes 0-9/{len(video)}"
+    status, headers, body = ctx.app.respond("GET", "/media/video/1", {"range": "bytes=-10"})
+    assert status == 206 and body.length == 10 and body.read() == video[-10:] and dict(headers)["Content-Range"] == f"bytes {len(video) - 10}-{len(video) - 1}/{len(video)}"
+    assert ctx.app.handle("GET", "/media/video/1", {"range": "bytes=-0"})[0] == 416
+
+
+def test_etag_revalidation_and_gzip_for_text_assets(ctx, tmp_path):
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "index.html").write_text("<p>hi</p>")
+    (web / "style.css").write_text("body { color: red; }\n" * 200)
+    ctx.app.web_dir = web
+    status, headers, _ = ctx.app.handle("GET", "/style.css", {})
+    headers = dict(headers)
+    assert status == 200 and headers["Cache-Control"] == "no-cache" and headers["ETag"] and headers["Last-Modified"] and "Content-Encoding" not in headers
+    assert ctx.app.handle("GET", "/style.css", {"if-none-match": headers["ETag"]})[0] == 304
+    status, zipped_headers, body = ctx.app.handle("GET", "/style.css", {"accept-encoding": "gzip, br"})
+    zipped_headers = dict(zipped_headers)
+    assert status == 200 and zipped_headers["Content-Encoding"] == "gzip" and zipped_headers["Vary"] == "Accept-Encoding"
+    assert gzip.decompress(body) == (web / "style.css").read_bytes()
+    assert ctx.app.handle("GET", "/style.css", {"if-none-match": zipped_headers["ETag"], "accept-encoding": "gzip"})[0] == 304
+    assert "Content-Encoding" not in dict(ctx.app.handle("GET", "/style.css", {"accept-encoding": "gzip", "range": "bytes=0-9"})[1])
+    for refusal in ("gzip;q=0", "br, gzip; q=0.0", "identity"):
+        assert "Content-Encoding" not in dict(ctx.app.handle("GET", "/style.css", {"accept-encoding": refusal})[1]), refusal
+    assert dict(ctx.app.handle("GET", "/style.css", {"accept-encoding": "gzip;q=0.5"})[1])["Content-Encoding"] == "gzip"
+    assert "Content-Encoding" not in dict(ctx.app.handle("GET", "/media/video/1", {"accept-encoding": "gzip"})[1])
+    status, headers, _ = ctx.app.handle("GET", "/media/video/1", {})
+    assert ctx.app.handle("GET", "/media/video/1", {"if-none-match": dict(headers)["ETag"]})[0] == 304
+
+
+def test_unframed_or_oversized_bodies_close_the_connection_unread(ctx, live):
+    oversized = raw_exchange(live, f"POST /api/feed HTTP/1.1\r\nHost: x\r\nContent-Length: {MAX_BODY_BYTES + 1}\r\n\r\n".encode())
+    assert oversized.startswith(b"HTTP/1.1 413") and b"Connection: close" in oversized
+    smuggle = b"GET /api/health HTTP/1.1\r\nHost: x\r\n\r\n"
+    for framing in (b"Transfer-Encoding: chunked\r\n", b"Content-Length: 5\r\nContent-Length: 6\r\n", b"Content-Length: 1x\r\n"):
+        reply = raw_exchange(live, b"POST /api/tick HTTP/1.1\r\nHost: x\r\n" + framing + b"\r\n" + smuggle)
+        assert reply.startswith(b"HTTP/1.1 400") and reply.count(b"HTTP/1.1 ") == 1, reply
+    with urllib.request.urlopen(f"http://127.0.0.1:{live}/api/health", timeout=5) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_duplicate_watch_retries_the_source_commit(ctx, monkeypatch):
+    item, viewed = deliver_and_view(ctx)
+    at = ctx.clock.advance(4)
+    real_commit = ctx.source.commit_watch
+    monkeypatch.setattr(ctx.source, "commit_watch", lambda rows, received_at, dry_run=False: real_commit(rows, received_at=received_at, dry_run=True) if dry_run
+                        else (_ for _ in ()).throw(OSError("disk")))
+    assert request(ctx, "POST", "/api/watch", watch_batch(item, viewed, at)) == (503, {"detail": "sync_commit_unconfirmed"})
+    monkeypatch.setattr(ctx.source, "commit_watch", real_commit)
+    status, retried = request(ctx, "POST", "/api/watch", watch_batch(item, viewed, at))
+    assert status == 200 and retried["status"] == "duplicate" and retried["stored_steps"] == 2
+    assert ctx.source.read([("video", item["id"])])["rows"][("video", item["id"])]["watch"]["watched_s"] == 4.0
+
+
+def test_duplicate_of_a_quarantined_watch_batch_stays_rejected(ctx, monkeypatch):
+    item, viewed = deliver_and_view(ctx)
+    at = ctx.clock.advance(4)
+    history = ctx.source.read([("video", item["id"])])["rows"].get(("video", item["id"]))
+    unproven = watch_batch(item, {"event_id": "not-a-view"}, at, capture="capture-unproven")
+    status, first = request(ctx, "POST", "/api/watch", unproven)
+    assert status == 200 and first["status"] == "rejected" and first["error_code"] == "watch_view_or_session_unproven" and first["quarantined"] == 2
+    real_commit = ctx.source.commit_watch
+    committed = []
+    monkeypatch.setattr(ctx.source, "commit_watch", lambda rows, received_at, dry_run=False: real_commit(rows, received_at=received_at, dry_run=True) if dry_run
+                        else committed.append(rows))
+    status, retried = request(ctx, "POST", "/api/watch", unproven)
+    assert status == 200 and retried["status"] == "rejected" and retried["error_code"] == "watch_view_or_session_unproven" and retried["stored_steps"] == 0
+    assert committed == [] and ctx.source.read([("video", item["id"])])["rows"].get(("video", item["id"])) == history
