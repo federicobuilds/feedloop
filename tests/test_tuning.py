@@ -116,9 +116,9 @@ def test_promotion_adopts_winner_ledgers_the_step_and_rotates(tmp_path):
     assert applied[:3] == ("embedding_weight", 0.35, 0.4) and json.loads(applied[3])["winner"] == "cand" and applied[4] == "applied"
     assert rotated[4] == "rotated" and json.loads(rotated[3]) == {"reason": "promoted", "next": "contributor_affinity_weight"}
     assert rows(tuner, "SELECT active_knob, stalls FROM experiment") == [("contributor_affinity_weight", 0)]
-    # the incoming knob's arms are deleted until explicit initialization
-    assert rows(tuner, "SELECT knob FROM arms") == [("embedding_weight",)]
-    assert tuner.arms("contributor_affinity_weight") is None
+    # the incoming knob's arms are seeded from its settled value in the same transaction
+    assert sorted(rows(tuner, "SELECT knob FROM arms")) == [("contributor_affinity_weight",), ("embedding_weight",)]
+    assert tuner.arms("contributor_affinity_weight")[:2] == (0.5, 0.6)
     # an obsolete revision is discarded without touching the store
     before = rows(tuner, "SELECT * FROM ledger")
     assert tuner.promote({"winner": "cand"}, expected_revision=0) is False
@@ -596,3 +596,86 @@ def test_cumulative_facts_come_from_owning_engines_at_the_cutoff(tmp_path):
     assert facts["items"][("image", 9)] == {"watched_s": 0.0, "duration_s": 0.0, "rating": 90.0, "engagement_count": 1}
     assert eng.tuner.cumulative_facts == eng.cumulative_facts
     assert not os.path.exists(eng.ledger_path) and not os.path.exists(eng.tuner_path)
+
+
+def _rotate_by(tuner, how):
+    if how == "promoted":
+        assert tuner.promote({"winner": "cand"}, expected_revision=tuner.revision[0]) is True
+    elif how == "stalled":
+        for _ in range(tuning.TUNER_STALL_EVALS):
+            tuner.stall("{}", expected_revision=tuner.revision[0])
+    else:
+        tuner.clock = lambda: 1000000.0 + tuning.TUNER_WINDOW_MAX_S + 3600.0
+        assert tuner.tick()["action"] == "rotate"
+
+
+@pytest.mark.parametrize("how", ["promoted", "stalled", "aged_out"])
+def test_rotation_seeds_next_knob_so_the_next_tick_runs_without_initialize(tmp_path, how):
+    evidence = {"status": "ok", "through_ts": 0.0, "viewed_ids": [], "events": [], "attribution_run": None}
+    tuner = make_tuner(tmp_path, clock=lambda: 1000000.0, read_evidence=Mock(return_value=evidence),
+                       summarize_trials=Mock(return_value={"status": "ok", "valid": False}))
+    tuner.initialize()
+    _rotate_by(tuner, how)
+    assert rows(tuner, "SELECT active_knob FROM experiment") == [("contributor_affinity_weight",)]
+    base, candidate, since_ts = tuner.arms("contributor_affinity_weight")
+    assert (base, candidate) == (0.5, 0.6)
+    result = tuner.tick(now=since_ts + tuning.TUNER_RIPEN_S + 3600.0)
+    assert result["action"] == "wait" and result["detail"]["reason"] == "evidence_invalid"
+
+
+def test_stale_promote_from_another_instance_is_rejected_by_the_store_revision(tmp_path):
+    a = make_tuner(tmp_path)
+    a.initialize()
+    revision = a.revision[0]
+    b = make_tuner(tmp_path)
+    b.rotate("operator")
+    b.initialize()
+    assert a.promote({"winner": "cand"}, expected_revision=revision) is False
+    assert rows(a, "SELECT knob, status FROM ledger WHERE status='applied'") == []
+    assert rows(a, "SELECT active_knob FROM experiment") == [("contributor_affinity_weight",)]
+    # the rejection teaches A the new store state; fresh evidence then applies to the right knob
+    assert a.revision[0] != revision
+    assert a.promote({"winner": "cand"}, expected_revision=a.revision[0]) is True
+    assert rows(a, "SELECT knob, new_value FROM ledger WHERE status='applied'") == [("contributor_affinity_weight", 0.6)]
+
+
+def test_unobserved_instance_first_fenced_write_is_checked_against_the_store(tmp_path):
+    b = make_tuner(tmp_path)
+    b.initialize()
+    b.rotate("operator")
+    a = make_tuner(tmp_path)
+    assert a.observed[0] is None
+    assert a.promote({"winner": "cand"}, expected_revision=0) is False
+    assert rows(a, "SELECT status FROM ledger WHERE status='applied'") == []
+    assert a.observed[0] == 2 and a.revision[0] == 1
+    assert a.promote({"winner": "cand"}, expected_revision=a.revision[0]) is True
+
+def test_store_revision_advances_on_every_committed_change_and_tolerates_legacy_stores(tmp_path):
+    os.makedirs(tmp_path / "legacy")
+    legacy = make_tuner(tmp_path / "legacy")
+    with sqlite3.connect(legacy.path) as conn:
+        conn.execute("CREATE TABLE experiment (id INTEGER PRIMARY KEY CHECK (id = 1), active_knob TEXT, stalls INTEGER, started_ts REAL)")
+        conn.execute("INSERT INTO experiment VALUES (1, 'embedding_weight', 0, 1.0)")
+        conn.execute("CREATE TABLE tuned (knob TEXT PRIMARY KEY, value REAL, updated_ts REAL)")
+    assert legacy.snapshot()[0] == ("embedding_weight", 0, 1.0)
+    legacy.initialize()
+    legacy.initialize()
+    assert rows(legacy, "SELECT revision FROM experiment") == [(1,)]
+    assert legacy.write("reset")["ok"] is True
+    legacy.stall("{}")
+    assert rows(legacy, "SELECT revision FROM experiment") == [(3,)]
+
+
+@pytest.mark.parametrize("base_reward, cand_reward, winner", [(0.0, 1.0, "cand"), (1.0, 0.0, "base")])
+def test_zero_variance_arms_with_distinct_means_are_significant(base_reward, cand_reward, winner):
+    mix = ("acts", "other", "bodyparts")
+    summary = decision_summary(lambda s, i: base_reward, lambda s, i: cand_reward, sessions=8, per_session=8,
+                               base_categories=mix, cand_categories=mix)
+    action, detail = decide(summary, now=2000000.0, window_started=1990000.0)
+    assert (action, detail["winner"]) == ("promote", winner)
+    assert json.loads(json.dumps(detail, allow_nan=False))["z"] is None
+
+
+def test_zero_variance_arms_with_equal_means_stall():
+    summary = decision_summary(lambda s, i: 0.5, lambda s, i: 0.5, sessions=8, per_session=8)
+    assert decide(summary, now=2000000.0, window_started=1990000.0)[0] == "stall"

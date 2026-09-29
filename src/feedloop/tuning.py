@@ -44,8 +44,17 @@ _SCHEMA = (
        old_value REAL, new_value REAL, evidence TEXT, status TEXT)""",
     "CREATE TABLE IF NOT EXISTS tuned (knob TEXT PRIMARY KEY, value REAL, updated_ts REAL)",
     """CREATE TABLE IF NOT EXISTS experiment (id INTEGER PRIMARY KEY CHECK (id = 1),
-       active_knob TEXT, stalls INTEGER, started_ts REAL)""",
+       active_knob TEXT, stalls INTEGER, started_ts REAL, revision INTEGER NOT NULL DEFAULT 0)""",
 )
+
+
+def store_revision(conn):
+    """The store-level experiment identity; stores created before it read as 0."""
+    try:
+        row = conn.execute("SELECT revision FROM experiment WHERE id=1").fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    return int(row[0]) if row else 0
 
 
 def registry_entry(knob, registry=TUNER_REGISTRY):
@@ -96,8 +105,10 @@ def decide(summary, *, now, window_started):
         mean = sum(xs) / n
         stats[arm] = (n, mean, sum((x - mean) ** 2 for x in xs) / (n - 1))
     error = math.sqrt(stats["base"][2] / stats["base"][0] + stats["cand"][2] / stats["cand"][0])
-    z = ((stats["cand"][1] - stats["base"][1]) / error) if error > 0 else 0.0
-    detail = {"counts": counts, "sessions": sessions, "z": round(z, 3), "means": {arm: round(stats[arm][1], 4) for arm in stats}}
+    diff = stats["cand"][1] - stats["base"][1]
+    # 2026-09-29, E-11: constant arms with distinct means are a certain difference, not a stall.
+    z = diff / error if error > 0 else (math.copysign(math.inf, diff) if diff else 0.0)
+    detail = {"counts": counts, "sessions": sessions, "z": round(z, 3) if math.isfinite(z) else None, "means": {arm: round(stats[arm][1], 4) for arm in stats}}
     if abs(z) < TUNER_Z:
         return "stall", detail
     winner, loser = ("cand", "base") if z > 0 else ("base", "cand")
@@ -124,16 +135,20 @@ class Tuner:
         self.automatic = automatic
         self.lock = threading.RLock()
         self.revision = [0]
+        self.observed = [None]
         self.tick_ts = [0.0]
         self.arms_cache = TTLCache("tuner_arms", 60.0)
         self.tuned_cache = TTLCache("tuner_snapshot", 60.0)
         self.listeners = []
 
     # ------------------------------------------------------------- state
-    def invalidate(self):
-        """Advance shared in-process state under the same lock as cache publication."""
+    def invalidate(self, store_revision=None):
+        """Advance shared in-process state under the same lock as cache publication;
+        ``store_revision`` is the store identity the new in-process revision stands for."""
         with self.lock:
             self.revision[0] += 1
+            if store_revision is not None:
+                self.observed[0] = store_revision
             self.arms_cache.clear()
             self.tuned_cache.clear()
             for listener in list(self.listeners):
@@ -145,11 +160,17 @@ class Tuner:
         conn = sqlite3.connect(self.path, timeout=5)
         for sql in _SCHEMA:
             conn.execute(sql)
+        if "revision" not in {col[1] for col in conn.execute("PRAGMA table_info(experiment)")}:
+            try:
+                conn.execute("ALTER TABLE experiment ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # 2026-09-29: another process added it first
         return conn
 
     @contextmanager
     def transaction(self, expected_revision=None):
-        """Commit one current decision, or yield None when its evidence is obsolete."""
+        """Commit one current decision, or yield None when its evidence is obsolete, in this
+        process or in the store (another tuner decided since); every commit advances both."""
         with self.lock:
             if expected_revision is not None and expected_revision != self.revision[0]:
                 yield None
@@ -157,11 +178,23 @@ class Tuner:
             conn = self.db()
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                identity = store_revision(conn)
+                # 2026-09-29 review: an instance that never observed the store binds its evidence to expected_revision.
+                expected_identity = expected_revision if self.observed[0] is None else self.observed[0]
+                if expected_revision is not None and identity != expected_identity:
+                    conn.rollback()
+                    self.invalidate(identity)
+                    yield None
+                    return
                 changes = conn.total_changes
                 yield conn
+                changed = conn.total_changes != changes
+                if changed:
+                    identity += 1
+                    conn.execute("UPDATE experiment SET revision=? WHERE id=1", (identity,))
                 conn.commit()
-                if conn.total_changes != changes:
-                    self.invalidate()
+                if changed:
+                    self.invalidate(identity)
             except BaseException:
                 conn.rollback()
                 raise
@@ -185,10 +218,18 @@ class Tuner:
             conn = None
             try:
                 conn = self._read_only()
+                # 2026-09-29 review: identity before state, so a commit in between pairs newer state with an
+                # older identity, which the next fenced write rejects; a read transaction would block writers.
+                identity = store_revision(conn)
                 row = conn.execute("SELECT active_knob, stalls, started_ts FROM experiment WHERE id=1").fetchone()
                 vals = {k: v for k, v in conn.execute("SELECT knob, value FROM tuned")}
                 with self.lock:
                     if revision != self.revision[0]:
+                        continue
+                    if self.observed[0] is None:
+                        self.observed[0] = identity
+                    elif identity != self.observed[0]:
+                        self.invalidate(identity)
                         continue
                     return self.tuned_cache.set((row, vals), now=now)
             except Exception:
@@ -299,10 +340,10 @@ class Tuner:
         """One autonomous evaluation of the active experiment, end to end."""
         now = self.clock() if now is None else now
         with self.lock:
-            revision = self.revision[0]
             state, _values = self.snapshot()
             active_knob = state[0] if state else None
             arms = self.arms(active_knob) if active_knob else None
+            revision = self.revision[0]
         if not active_knob or not arms:
             return {"action": "disabled"}
         window_started = float(arms[2] or 0.0)
@@ -367,7 +408,7 @@ class Tuner:
 
     def rotate(self, reason: str, expected_revision=None) -> None:
         """Advance to the next registry knob; the outgoing one keeps its tuned value.
-        The incoming knob's arms are deleted; ``initialize`` must seed them explicitly."""
+        The incoming knob's arms are reseeded from its settled value in the same transaction."""
         with self.transaction(expected_revision) as conn:
             if conn is None:
                 return
@@ -380,20 +421,26 @@ class Tuner:
                          (now, current, None, None, json.dumps({"reason": reason, "next": nxt}), "rotated"))
             conn.execute("UPDATE experiment SET active_knob=?, stalls=0, started_ts=? WHERE id=1", (nxt, now))
             conn.execute("DELETE FROM arms WHERE knob=?", (nxt,))
+            self._seed_arms(conn, nxt, now)
+
+    def _seed_arms(self, conn, knob, now):
+        """Base at the knob's settled value, candidate one bounded step up; existing arms stay."""
+        entry = self.registry_entry(knob)
+        if entry is None:
+            raise ValueError("unknown active tuner knob")
+        row = conn.execute("SELECT value FROM tuned WHERE knob=?", (knob,)).fetchone()
+        base = float(row[0]) if row else knob_default(knob)
+        candidate = round(min(entry["max"], max(entry["min"], base + entry["step"])), 6)
+        conn.execute("INSERT OR IGNORE INTO arms VALUES (?,?,?,?)", (knob, base, candidate, now))
 
     def initialize(self):
         """Explicit maintenance entry: create the store, the experiment row and the active knob's arms."""
         with self.transaction() as conn:
             now = self.clock()
-            conn.execute("INSERT OR IGNORE INTO experiment VALUES (1,?,?,?)", (self.registry[0]["knob"], 0, now))
+            conn.execute("INSERT OR IGNORE INTO experiment (id, active_knob, stalls, started_ts) VALUES (1,?,?,?)",
+                         (self.registry[0]["knob"], 0, now))
             knob = conn.execute("SELECT active_knob FROM experiment WHERE id=1").fetchone()[0]
-            entry = self.registry_entry(knob)
-            if entry is None:
-                raise ValueError("unknown active tuner knob")
-            row = conn.execute("SELECT value FROM tuned WHERE knob=?", (knob,)).fetchone()
-            base = float(row[0]) if row else knob_default(knob)
-            candidate = round(min(entry["max"], max(entry["min"], base + entry["step"])), 6)
-            conn.execute("INSERT OR IGNORE INTO arms VALUES (?,?,?,?)", (knob, base, candidate, now))
+            self._seed_arms(conn, knob, now)
 
     # ------------------------------------------------------------ control
     def write(self, action: str, ledger_id: int | None = None) -> dict:
