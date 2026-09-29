@@ -178,7 +178,7 @@ def test_engine_feed_search_similar_over_folder(tmp_path):
                     config={"explore_slots": 0, "control_rate": 0.0, "cooldown_days": 0.0})
     clock.advance(60)
     page = engine.feed({"limit": 8, "images": True, "surface": "feed", "session_id": "s", "request_id": "r", "client_request_id": "c"})
-    assert page["status"] == "ok" and len(page["items"]) == 6 and {i["kind"] for i in page["items"]} == {"video"}, "no positive evidence yet: the fallback lane serves only primary items"
+    assert page["status"] == "ok" and len(page["items"]) == 8 and {i["kind"] for i in page["items"]} == {"video", "image"}, "the cold-start fallback lane now serves images as well as primary items"
     assert all(i["media_url"] == f"/media/{i['kind']}/{i['id']}" for i in page["items"])
     assert engine.search("amber", "look")["status"] == "no-feature", "discovery.search needs window rows; the means-only space has none (the server route supplies the means fallback)"
     assert engine.search("amber", "sound")["status"] == "no-feature"
@@ -242,3 +242,45 @@ def test_long_media_name_keeps_the_item_and_names_the_missing_sidecar(tmp_path):
     after = {i["title"]: i for i in source.refresh() and source.enumerate(("video", "image"), 1, 50)["items"]}
     assert after["sample-00"]["tags"] and after[long_stem]["sidecar_reason"] == "sidecar_path_too_long"
     assert sorted(p.name for p in media.iterdir() if p.suffix == ".json") == ["sample-00.mp4.json", "still-00.jpg.generated.json", "still-00.jpg.json"]
+
+
+def test_malformed_sidecar_fields_mark_the_item_and_the_scan_continues(tmp_path):
+    source, media, _ = source_for(tmp_path)
+    (media / "sample-00.mp4.json").write_text(json.dumps({"title": "Kept", "tags": 1, "contributors": {"a": 1}, "duration_s": "long"}))
+    (media / "sample-01.mp4.json").write_text(json.dumps({"tags": {"unexpected": "shape"}, "segments": [{"start_s": 1, "tags": 3}], "tag_seconds": [1]}))
+    (media / "sample-02.mp4.generated.json").write_text(json.dumps({"tags": "zero"}))
+    source.refresh()
+    items = {(i["kind"], i["id"]): i for i in source.fetch([("video", 1), ("video", 2), ("video", 3), ("video", 4)])["items"]}
+    assert items[("video", 1)]["title"] == "Kept" and items[("video", 1)]["tags"] == [] and items[("video", 1)]["contributor_ids"] == []
+    assert items[("video", 1)]["duration_s"] is None and items[("video", 2)]["tags"] == [] and "unexpected" not in source.tag_names().values()
+    assert [items[k]["sidecar_reason"] for k in sorted(items)] == ["sidecar_invalid", "sidecar_invalid", "sidecar_invalid", None]
+    assert build_text_hash_space(source, "text")["items"] >= 1
+
+
+def test_write_space_rejects_mismatched_or_invalid_windows(tmp_path):
+    source, _, _ = source_for(tmp_path)
+    keys, matrix = [("video", 1)], np.ones((1, 2), dtype=np.float32)
+    meta = {"provenance": "test", "window_scope": "timed"}
+    for windows in (([("video", 1)], [0.0, 1.0], np.ones((1, 2))), ([("video", 1)] * 2, [0.0], np.ones((2, 2))),
+                    ([("video", 1)], [[0.0]], np.ones((1, 2))), ([("video", 1)], [-1.0], np.ones((1, 2))),
+                    ([("video", 1)], [float("nan")], np.ones((1, 2))), ([("video", 1)], [0.0], np.full((1, 2), np.inf))):
+        with pytest.raises(ValueError):
+            source.write_space("bad", keys, matrix, meta=meta, windows=windows)
+    assert "bad" not in source.spaces()
+
+
+def test_signal_writes_keep_the_inventory_and_spaces_load_once(tmp_path, monkeypatch):
+    source, _, _ = source_for(tmp_path)
+    token = source.enumerate(["video"], 1, 50)["change_token"]
+    calls = []
+    monkeypatch.setattr(source, "_walk", lambda real=source._walk: calls.append(1) or real())
+    assert source.apply_change(("video", 1), {"action": "rating", "rating100": 60})["status"] == "confirmed"
+    assert source.enumerate(["video"], 1, 50)["change_token"] != token and calls == []
+    source.write_space("s", [("video", 1)], np.ones((1, 2)), meta={"provenance": "t", "window_scope": "none"})
+    loads = []
+    real_load = np.load
+    monkeypatch.setattr(np, "load", lambda *a, **k: loads.append(1) or real_load(*a, **k))
+    source.revision("s"), source.matrix("s"), source.matrix("s"), source.windows("s"), source.space_meta("s")
+    assert len(loads) == 2
+    revision = source.write_space("s", [("video", 1), ("video", 2)], np.ones((2, 2)), meta={"provenance": "t", "window_scope": "none"})
+    assert source.revision("s") == revision and len(source.matrix("s")[0]) == 2

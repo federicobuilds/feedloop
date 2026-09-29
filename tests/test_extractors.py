@@ -236,3 +236,47 @@ def test_ffmpeg_is_the_default_and_undecodable_videos_are_skipped(tmp_path):
         VisualExtractor("fake", backend=FakeVisualBackend(), frame_sampler=missing).extract_folder(source, overwrite=True)
     with pytest.raises(MissingExtra):
         AudioExtractor("fake", backend=FakeAudioBackend(), decoder=missing).extract_folder(source)
+
+
+def test_corrupt_image_is_skipped_by_name(tmp_path):
+    media = make_folder(tmp_path, videos=1, images=3)
+    source = FilesystemSource(media, tmp_path / "state", clock=Clock())
+    backend = FakeVisualBackend()
+    real_open = backend.open_image
+    backend.open_image = lambda path: (_ for _ in ()).throw(OSError("corrupt")) if Path(path).name == "still-01.jpg" else real_open(path)
+    report = VisualExtractor("fake-model", backend=backend, frame_sampler=lambda path: []).extract_folder(source, space="visual")
+    assert report["items"] == 2 and report["skipped"]["image:2"] == "undecodable:OSError"
+
+
+def test_existing_space_without_overwrite_does_not_load_models(tmp_path):
+    media = make_folder(tmp_path, videos=1, images=1)
+    source = FilesystemSource(media, tmp_path / "state", clock=Clock())
+    source.write_space("visual", [("image", 1)], np.ones((1, 4)), meta={"provenance": "t", "window_scope": "none"})
+    source.write_space("audioembed", [("video", 1)], np.ones((1, 3)), meta={"provenance": "t", "window_scope": "none"})
+    visual_backend, audio_backend = FakeVisualBackend(), FakeAudioBackend()
+    audio_backend.load = lambda: pytest.fail("audio model loaded for a kept space")
+    assert VisualExtractor("m", backend=visual_backend).extract_folder(source, space="visual")["kept_existing_space"] is True
+    assert AudioExtractor("m", backend=audio_backend, decoder=lambda path: (np.zeros(8), 8)).extract_folder(source)["kept_existing_space"] is True
+    assert visual_backend.loaded == 0
+
+
+def test_generated_tags_refresh_once_not_per_item(tmp_path, monkeypatch):
+    media = make_folder(tmp_path, videos=1, images=3)
+    source = FilesystemSource(media, tmp_path / "state", clock=Clock())
+    calls = []
+    real_refresh = source.refresh
+    monkeypatch.setattr(source, "refresh", lambda: calls.append(1) or real_refresh())
+    report = VisualExtractor("m", backend=FakeVisualBackend(), vocabulary=["alpha", "beta"], frame_sampler=lambda path: []).extract_folder(source, space="visual")
+    assert report["items"] == 3 and len(report["zero_shot_tags"]) == 3 and len(calls) == 2
+
+
+def test_audio_decoder_timeout_is_a_skipped_reason(tmp_path):
+    import subprocess
+    media = make_folder(tmp_path, videos=2, images=0)
+    source = FilesystemSource(media, tmp_path / "state", clock=Clock())
+    def decoder(path):
+        if path.name == "sample-00.mp4":
+            raise subprocess.TimeoutExpired("ffmpeg", 120)
+        return np.ones(8, dtype=np.float32), 8
+    report = AudioExtractor("m", backend=FakeAudioBackend(), decoder=decoder).extract_folder(source)
+    assert report["items"] == 1 and report["skipped"] == {"video:1": "undecodable:TimeoutExpired"}

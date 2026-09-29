@@ -29,6 +29,7 @@ from feedloop.sources.filesystem import GENERATED_SUFFIX, FilesystemSource, side
 DEFAULT_PROMPT = "a photo of {}"
 DEFAULT_PRETRAINED = {"ViT-B-32": "laion2b_s34b_b79k"}
 FRAMES_PER_VIDEO = 8
+FFMPEG_TIMEOUT_S = 120
 
 
 def resolve_pretrained(model: str, pretrained: str | None, listed_tags: Sequence[str]) -> str | None:
@@ -48,7 +49,7 @@ def ffmpeg_frame_sampler(path: Path, *, frames: int = FRAMES_PER_VIDEO) -> list:
     """``frames`` RGB images at evenly spaced timestamps; an unreadable file raises OSError."""
     ffmpeg = require("imageio_ffmpeg", purpose="the video frame sampler").get_ffmpeg_exe()
     image_module = require("PIL.Image", purpose="the video frame sampler")
-    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, errors="replace")
+    probe = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, errors="replace", timeout=FFMPEG_TIMEOUT_S)
     found = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", probe.stderr)
     if not found:
         raise OSError(f"ffmpeg found no duration in {path.name}")
@@ -58,7 +59,7 @@ def ffmpeg_frame_sampler(path: Path, *, frames: int = FRAMES_PER_VIDEO) -> list:
     for index in range(frames):
         at = duration * (index + 0.5) / frames
         grab = subprocess.run([ffmpeg, "-v", "error", "-ss", f"{at:.3f}", "-i", str(path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
-                              capture_output=True)
+                              capture_output=True, timeout=FFMPEG_TIMEOUT_S)
         if grab.returncode == 0 and grab.stdout:
             with image_module.open(io.BytesIO(grab.stdout)) as image:
                 images.append(image.convert("RGB"))
@@ -147,11 +148,12 @@ class VisualExtractor:
         return zero_shot_tags(vectors, words, self.vocabulary)
 
     def extract_folder(self, source: FilesystemSource, *, space="visual", write_tags=True, overwrite=False, batch_size=16) -> dict:
-        """Embed every image and every video the frame sampler can open, and write the space."""
-        self.load()
+        """Embed every image and every video the frame sampler can open, and write the space.
+        A file that fails to open or decode (including an ffmpeg timeout) is skipped by name."""
         if space in source.spaces() and not overwrite:
             return {"space": space, "model": self.model, "items": 0, "skipped": {}, "revision": source.revision(space), "zero_shot_tags": {},
                     "generated_files_kept": [], "kept_existing_space": True}
+        self.load()
         scan = source.refresh()
         keys, vectors, skipped, tagged = [], [], {}, {}
         rows = sorted(scan["items"].items())
@@ -160,7 +162,13 @@ class VisualExtractor:
             for key, entry in rows[start:start + batch_size]:
                 path = source.folder / entry["relpath"]
                 if key[0] == "image":
-                    images.append(self.backend.open_image(path))
+                    try:
+                        images.append(self.backend.open_image(path))
+                    except MissingExtra:
+                        raise
+                    except Exception as exc:
+                        skipped[f"{key[0]}:{key[1]}"] = "undecodable:" + type(exc).__name__
+                        continue
                     batch.append(key)
                 else:
                     try:
@@ -183,13 +191,16 @@ class VisualExtractor:
         matrix = np.stack(vectors) if vectors else np.zeros((0, 1), dtype=np.float32)
         kept_existing, unwritable = [], {}
         if write_tags and self.vocabulary and keys:
-            reasons = source.sidecar_reasons(keys)
             for key, tags in zip(keys, self.tags_for(matrix)):
                 tagged[f"{key[0]}:{key[1]}"] = tags
-                if reasons.get(key) in ("sidecar_path_too_long", "sidecar_unreadable"):
-                    unwritable[f"{key[0]}:{key[1]}"] = reasons[key]
-                elif write_generated_tags(source, key, tags, model=self.model, overwrite=overwrite) is None:
+                entry = scan["items"][key]
+                reason = entry["sidecar"].get("_reason")
+                if reason in ("sidecar_path_too_long", "sidecar_unreadable"):
+                    unwritable[f"{key[0]}:{key[1]}"] = reason
+                elif write_generated_tags(source, key, tags, model=self.model, overwrite=overwrite, relpath=entry["relpath"]) is None:
                     kept_existing.append(f"{key[0]}:{key[1]}")
+            if len(kept_existing) + len(unwritable) < len(keys):
+                source.refresh()
         revision = None
         if keys:
             meta = {"provenance": f"open_clip:{self.model}", "window_scope": "none", "kind": "visual", "built_at": source.clock()}
@@ -201,14 +212,17 @@ class VisualExtractor:
 GENERATED_FIELDS = ("model", "method", "tags")
 
 
-def write_generated_tags(source: FilesystemSource, key, tags: Sequence[tuple[str, float]], *, model: str, overwrite: bool = False):
+def write_generated_tags(source: FilesystemSource, key, tags: Sequence[tuple[str, float]], *, model: str, overwrite: bool = False,
+                         relpath: str | None = None):
     """Generated tags live in ``<file>.generated.json`` beside the media, separate from the
     user's sidecar. An existing file is left untouched unless ``overwrite`` is set, and even
     then only the generated fields change: every other key and every tag entry that is not
     ``zero_shot`` (a user's correction inside that file) is preserved. Returns the path, or
     None when an existing file was kept or the filesystem refuses the generated path (the
-    source records that item's ``sidecar_reason``)."""
-    relpath = source.refresh()["items"][key]["relpath"]
+    source records that item's ``sidecar_reason``). A caller writing many files passes each
+    ``relpath`` from its own scan snapshot and refreshes the source once afterwards."""
+    if relpath is None:
+        relpath = source.refresh()["items"][key]["relpath"]
     path = Path(str(source.folder / relpath) + GENERATED_SUFFIX)
     if sidecar_path_reason(path):
         return None

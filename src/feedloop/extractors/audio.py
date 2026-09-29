@@ -19,6 +19,8 @@ import numpy as np
 from feedloop.extractors import MissingExtra, require
 from feedloop.sources.filesystem import FilesystemSource
 
+FFMPEG_TIMEOUT_S = 120
+
 
 class ClapBackend:
     def __init__(self, model: str, *, device="cpu"):
@@ -61,7 +63,8 @@ def soundfile_decoder(path: Path):
 def ffmpeg_decoder(path: Path, *, rate: int = 48000):
     """The mono audio track of any container ffmpeg reads, as float32 at ``rate``."""
     ffmpeg = require("imageio_ffmpeg", purpose="the default audio decoder").get_ffmpeg_exe()
-    run = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"], capture_output=True)
+    run = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(rate), "-f", "f32le", "-"], capture_output=True,
+                         timeout=FFMPEG_TIMEOUT_S)
     if run.returncode != 0 or not run.stdout:
         raise OSError(run.stderr.decode("utf-8", "replace").strip() or f"no audio track in {path.name}")
     return np.frombuffer(run.stdout, dtype="<f4").copy(), rate
@@ -102,12 +105,13 @@ class AudioExtractor:
 
     def extract_folder(self, source: FilesystemSource, *, space=None, overwrite=False, batch_size=8) -> dict:
         """Writes only the feature space file; no sidecar or generated tag file is touched. An
-        existing space is replaced only with ``overwrite``."""
-        self.load()
+        existing space is replaced only with ``overwrite``. A decoder failure, including an
+        ffmpeg timeout, skips that file by name."""
         space = space or self.space
         self.space = space
         if space in source.spaces() and not overwrite:
             return {"space": space, "model": self.model, "items": 0, "skipped": {}, "revision": source.revision(space), "kept_existing_space": True}
+        self.load()
         scan = source.refresh()
         keys, vectors, skipped = [], [], {}
         rows = [(key, entry) for key, entry in sorted(scan["items"].items()) if key[0] == source.kinds[0]]

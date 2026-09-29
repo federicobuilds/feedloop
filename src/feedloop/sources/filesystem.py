@@ -48,7 +48,9 @@ SIDECAR_SUFFIX = ".json"
 GENERATED_SUFFIX = ".generated.json"
 DEFAULT_TAG_CATEGORY = "general"
 TEXT_HASH_DIM = 64
-SCAN_TTL_S = 1.0
+SCAN_TTL_S = 10.0
+# 2026-09-29: container types a sidecar field must have; any other type marks the sidecar invalid.
+_SIDECAR_FIELD_TYPES = {"tags": list, "contributors": list, "segments": list, "tag_seconds": dict, "duration_s": (int, float)}
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS items(kind TEXT NOT NULL, id INTEGER NOT NULL, relpath TEXT NOT NULL UNIQUE,"
@@ -91,6 +93,18 @@ def _merge(intervals):
 
 def _utc_day(ts: float) -> int:
     return int(ts // 86400)
+
+
+def _validated_sidecar(data: dict) -> dict:
+    """``data`` without fields whose container type is wrong; any such field marks it
+    ``_invalid`` (the ``sidecar_invalid`` reason) so one malformed sidecar never aborts a scan."""
+    bad = {name for name, kind in _SIDECAR_FIELD_TYPES.items()
+           if data.get(name) is not None and (not isinstance(data[name], kind) or isinstance(data[name], bool))}
+    if isinstance(data.get("segments"), list) and not all(isinstance(s, dict) and isinstance(s.get("tags") or [], list) for s in data["segments"]):
+        bad.add("segments")
+    if not bad:
+        return data
+    return {**{k: v for k, v in data.items() if k not in bad}, "_invalid": True}
 
 
 def sidecar_path_reason(path: Path) -> str | None:
@@ -150,6 +164,7 @@ class FilesystemSource:
         self.scan_ttl_s = scan_ttl_s
         self._scan: dict | None = None
         self._scanned_at = -math.inf
+        self._space_cache: dict[str, tuple] = {}
         with self._connection(write=True) as conn:
             for statement in _SCHEMA:
                 conn.execute(statement)
@@ -193,51 +208,65 @@ class FilesystemSource:
                 found.append(path.relative_to(self.folder).as_posix())
         return found
 
-    def _fingerprint(self, conn, relpath: str, stat: os.stat_result):
-        row = conn.execute("SELECT * FROM fingerprints WHERE relpath=?", (relpath,)).fetchone()
-        if row and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns:
-            return row["md5"], row["sha256"]
+    @staticmethod
+    def _hash(path: Path):
         md5, sha = hashlib.md5(), hashlib.sha256()
-        with open(self.folder / relpath, "rb") as handle:
+        with open(path, "rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 md5.update(chunk)
                 sha.update(chunk)
-        conn.execute("INSERT INTO fingerprints VALUES(?,?,?,?,?) ON CONFLICT(relpath) DO UPDATE SET size=excluded.size,"
-                     " mtime_ns=excluded.mtime_ns, md5=excluded.md5, sha256=excluded.sha256",
-                     (relpath, stat.st_size, stat.st_mtime_ns, md5.hexdigest(), sha.hexdigest()))
         return md5.hexdigest(), sha.hexdigest()
 
     def refresh(self) -> dict:
-        """Scan the folder, assign ids to new paths, refresh fingerprints, read sidecars."""
-        relpaths = self._walk()
+        """Scan the folder, assign ids to new paths, refresh fingerprints, read sidecars.
+        All file I/O (stat, hashing, sidecars) happens before the one short write transaction."""
+        with self._connection() as conn:
+            cached = {r["relpath"]: (r["size"], r["mtime_ns"], r["md5"], r["sha256"]) for r in conn.execute("SELECT * FROM fingerprints")}
+        files, hashed = {}, []
+        for relpath in self._walk():
+            path = self.folder / relpath
+            kind = _kind_of(path)
+            if kind not in self.kinds:
+                continue
+            stat = path.stat()
+            row = cached.get(relpath)
+            if row and row[0] == stat.st_size and row[1] == stat.st_mtime_ns:
+                md5, sha = row[2], row[3]
+            else:
+                md5, sha = self._hash(path)
+                hashed.append((relpath, stat.st_size, stat.st_mtime_ns, md5, sha))
+            sidecar, sidecar_mtime = self._sidecar(path)
+            files[relpath] = (kind, {"relpath": relpath, "size": stat.st_size, "md5": md5, "sha256": sha,
+                                     "sidecar": sidecar, "sidecar_mtime_ns": sidecar_mtime})
         with self._connection(write=True) as conn:
             known = {r["relpath"]: (r["kind"], r["id"]) for r in conn.execute("SELECT kind, id, relpath FROM items")}
             next_id = {kind: (conn.execute("SELECT coalesce(max(id), 0) FROM items WHERE kind=?", (kind,)).fetchone()[0] + 1)
                        for kind in self.kinds}
             now = self.clock()
             items = {}
-            for relpath in relpaths:
-                path = self.folder / relpath
-                kind = _kind_of(path)
-                if kind not in self.kinds:
-                    continue
+            for relpath, (kind, entry) in files.items():
                 if relpath not in known:
                     conn.execute("INSERT INTO items VALUES(?,?,?,?)", (kind, next_id[kind], relpath, now))
                     known[relpath] = (kind, next_id[kind])
                     next_id[kind] += 1
-                key = known[relpath]
-                stat = path.stat()
-                md5, sha = self._fingerprint(conn, relpath, stat)
-                sidecar, sidecar_mtime = self._sidecar(path)
-                items[key] = {"relpath": relpath, "size": stat.st_size, "md5": md5, "sha256": sha,
-                              "sidecar": sidecar, "sidecar_mtime_ns": sidecar_mtime}
+                items[known[relpath]] = entry
+            conn.executemany("INSERT INTO fingerprints VALUES(?,?,?,?,?) ON CONFLICT(relpath) DO UPDATE SET size=excluded.size,"
+                             " mtime_ns=excluded.mtime_ns, md5=excluded.md5, sha256=excluded.sha256", hashed)
             tag_ids = self._register_tags(conn, items)
             revision = self._signals_revision(conn)
             names = {int(r["id"]): (r["name"], r["category"]) for r in conn.execute("SELECT id, name, category FROM tags")}
-        self._scan = {"items": items, "tag_ids": tag_ids, "tag_rows": names, "signals_revision": revision,
-                      "change_token": _digest([sorted((f"{k[0]}:{k[1]}", v["sha256"], v["sidecar_mtime_ns"]) for k, v in items.items()), revision])}
+        inventory = sorted((f"{k[0]}:{k[1]}", v["sha256"], v["sidecar_mtime_ns"]) for k, v in items.items())
+        self._scan = {"items": items, "tag_ids": tag_ids, "tag_rows": names, "inventory": inventory,
+                      "signals_revision": revision, "change_token": _digest([inventory, revision])}
         self._scanned_at = time.monotonic()
         return self._scan
+
+    def _refresh_signals(self, conn):
+        """A signal or watch write moves only the signal part of the cached scan; the file
+        inventory stays until the TTL or an explicit refresh()."""
+        if self._scan is not None:
+            revision = self._signals_revision(conn)
+            self._scan.update(signals_revision=revision, change_token=_digest([self._scan["inventory"], revision]))
 
     def _sidecar(self, path: Path):
         """The user's sidecar, plus tags from an extractor's separate generated file. The
@@ -253,15 +282,19 @@ class FilesystemSource:
             mtime = sidecar.stat().st_mtime_ns
             try:
                 loaded = json.loads(sidecar.read_text(encoding="utf-8"))
-                data = loaded if isinstance(loaded, dict) else {"_invalid": True}
+                data = _validated_sidecar(loaded) if isinstance(loaded, dict) else {"_invalid": True}
             except (ValueError, OSError):
                 data = {"_invalid": True}
         if generated.is_file():
             mtime = max(mtime, generated.stat().st_mtime_ns)
             try:
                 extra = json.loads(generated.read_text(encoding="utf-8"))
-                if isinstance(extra, dict) and isinstance(extra.get("tags"), list):
-                    data = {**data, "tags": list(data.get("tags") or []) + [t for t in extra["tags"] if isinstance(t, dict)]}
+                if isinstance(extra, dict):
+                    extra = _validated_sidecar(extra)
+                    if extra.get("_invalid"):
+                        data = {**data, "_invalid": True}
+                    if isinstance(extra.get("tags"), list):
+                        data = {**data, "tags": list(data.get("tags") or []) + [t for t in extra["tags"] if isinstance(t, dict)]}
             except (ValueError, OSError):
                 pass
         return data, (mtime or None)
@@ -453,7 +486,7 @@ class FilesystemSource:
             conn.execute("INSERT INTO signals VALUES(?,?,?,?,?) ON CONFLICT(kind, id) DO UPDATE SET rating=excluded.rating,"
                          " engagement_count=excluded.engagement_count, updated_ts=excluded.updated_ts", (*key, rating, count, self.clock()))
             self._mark_written(conn)
-        self._scan = None
+            self._refresh_signals(conn)
         return {"status": "confirmed", "rating100": rating, "engagement_count": count}
 
     def commit_watch(self, rows: Sequence[Mapping[str, Any]], *, received_at: float, dry_run: bool = False) -> dict:
@@ -491,7 +524,7 @@ class FilesystemSource:
                 conn.execute("INSERT INTO watch VALUES(?,?,?,?,?,?,?,?)", interval)
             if pending:
                 self._mark_written(conn)
-        self._scan = None
+            self._refresh_signals(conn)
         return {"status": "committed", "stored": len(pending), "credited": len(intervals), "received_at": received_at}
 
     def _validate_step(self, conn, row, pending, received_at):
@@ -561,17 +594,47 @@ class FilesystemSource:
             raise ValueError("invalid space name")
         return self.spaces_dir / (space + ".npz")
 
-    def _load_space(self, space):
+    def _space_file(self, space):
+        """The space path and its cache key, or None when no space file exists."""
         path = self._space_path(space)
         if not path.is_file():
             return None
+        stat = path.stat()
+        return path, (str(path), stat.st_mtime_ns, stat.st_size)
+
+    def _load_space(self, space):
+        """All arrays and meta, loaded once per file version: write_space's atomic replace
+        changes (mtime, size), so a rewritten space is reloaded."""
+        found = self._space_file(space)
+        if found is None:
+            return None
+        path, cache_key = found
+        cached = self._space_cache.get(space)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
         try:
             with np.load(path, allow_pickle=False) as data:
                 loaded = {name: data[name] for name in data.files}
             meta = json.loads(str(loaded["meta"][0])) if "meta" in loaded else {}
         except (OSError, ValueError, KeyError, IndexError):
             return None
+        self._space_cache[space] = (cache_key, (loaded, meta))
         return loaded, meta
+
+    def _read_space_meta(self, space):
+        """Only the meta member of the NPZ (members load lazily), unless already cached."""
+        found = self._space_file(space)
+        if found is None:
+            return None
+        path, cache_key = found
+        cached = self._space_cache.get(space)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1][1]
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                return json.loads(str(data["meta"][0])) if "meta" in data.files else {}
+        except (OSError, ValueError, KeyError, IndexError):
+            return None
 
     def spaces(self):
         if not self.spaces_dir.is_dir():
@@ -592,11 +655,8 @@ class FilesystemSource:
         return [keys[n] for n in rows], matrix[rows]
 
     def revision(self, space):
-        loaded = self._load_space(space)
-        if loaded is None:
-            return None
-        _data, meta = loaded
-        return meta.get("revision")
+        meta = self._read_space_meta(space)
+        return None if meta is None else meta.get("revision")
 
     def windows(self, space):
         loaded = self._load_space(space)
@@ -609,8 +669,7 @@ class FilesystemSource:
         return [keys[n] for n in rows], np.asarray(data["window_times"], dtype=np.float32)[rows], np.asarray(data["window_matrix"], dtype=np.float32)[rows]
 
     def space_meta(self, space):
-        loaded = self._load_space(space)
-        return None if loaded is None else loaded[1]
+        return self._read_space_meta(space)
 
     def write_space(self, space: str, keys, matrix, *, meta: Mapping[str, Any], windows=None):
         """Store one feature space. ``meta`` must name its ``provenance`` and ``window_scope``
@@ -628,7 +687,9 @@ class FilesystemSource:
             window_keys, times, window_matrix = windows
             window_matrix = np.asarray(window_matrix, dtype=np.float32)
             times = np.asarray(times, dtype=np.float32)
-            if window_matrix.ndim != 2 or window_matrix.shape[0] != len(window_keys) != len(times) or window_matrix.shape[1] != matrix.shape[1]:
+            if (window_matrix.ndim != 2 or times.ndim != 1 or not window_matrix.shape[0] == len(window_keys) == times.shape[0]
+                    or window_matrix.shape[1] != matrix.shape[1] or not np.isfinite(window_matrix).all()
+                    or not np.isfinite(times).all() or (times < 0).any()):
                 raise ValueError("invalid window rows")
             arrays.update(window_keys=np.array([f"{k}:{i}" for k, i in window_keys]), window_times=times, window_matrix=window_matrix)
         stored = {**meta, "dim": int(matrix.shape[1]), "items": int(matrix.shape[0])}
