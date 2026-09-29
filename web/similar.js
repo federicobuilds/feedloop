@@ -3,7 +3,7 @@
    Change opens an inline id field; a submit changes the hash, and the remount dispatches once. */
 import { getJSON, isAbort } from "./api.js";
 import { announce, formatNumber, partial, setState } from "./state.js";
-import { gridCard } from "./cards.js";
+import { gridCard, stopVideos } from "./cards.js";
 
 /* Registered before the router's listener, so the navigation that opens Similar already counts:
    Back returns within the app, and a page opened cold falls back to Feed. */
@@ -81,5 +81,5 @@ export function mountSimilar(host) {
   });
   field.value = id;
   run(id);
-  return { dispose() { generation++; if (controller) controller.abort(); }, run };
+  return { dispose() { generation++; stopVideos(host); if (controller) controller.abort(); }, run };
 }

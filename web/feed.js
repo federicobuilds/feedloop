@@ -6,7 +6,7 @@ import { deliverFeed, isStaleCursor, itemKey } from "./api.js";
 import { building, partial, setState } from "./state.js";
 import { evidenceStrip, explanation } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
-import { media, metaLine, similarLink, whyText } from "./cards.js";
+import { media, metaLine, similarLink, stopVideos, whyText } from "./cards.js";
 import { observeView } from "./watch.js";
 import { icon } from "./icons.js";
 
@@ -14,6 +14,8 @@ import { icon } from "./icons.js";
 function ownsKeys(target) {
   return !!(target.closest && target.closest("input, textarea, select, button, video, audio, summary, [contenteditable]:not([contenteditable='false'])"));
 }
+
+const MUTE_KEY = "feedloop-muted";
 
 export function mountFeed(host) {
   const view = document.createElement("div");
@@ -35,10 +37,55 @@ export function mountFeed(host) {
     building(row, name === "loading");
   }
 
-  /* one observer for the column: a video that scrolls out of view is paused, never left playing */
-  const offscreen = new IntersectionObserver(entries => entries.forEach(entry => {
-    if (entry.intersectionRatio < 0.5) entry.target.querySelectorAll("video").forEach(video => video.pause());
-  }), { root: col, threshold: [0, 0.5] });
+  /* Sound is one setting for every Feed video, muted until the user turns it on, because
+     browsers only autoplay muted media before a gesture. */
+  let muted = localStorage.getItem(MUTE_KEY) !== "0", active = null, resume = false;
+  function paintMute(button) {
+    button.replaceChildren(icon(muted ? "muted" : "sound"));
+    button.setAttribute("aria-pressed", String(!muted));
+  }
+  function setMuted(value, remember) {
+    muted = value;
+    if (remember) localStorage.setItem(MUTE_KEY, value ? "1" : "0");
+    col.querySelectorAll(".feed-media video").forEach(video => { video.muted = value; });
+    col.querySelectorAll(".feed-mute").forEach(paintMute);
+  }
+  function start(video) {
+    video.muted = muted;
+    video.play().catch(error => {
+      if (error.name !== "NotAllowedError" || video.muted) return;
+      setMuted(true, false);
+      video.play().catch(() => {});
+    });
+  }
+
+  /* The cell at least 60 percent visible (the rule watch.js qualifies views by) is the
+     current one: its video plays and the next one preloads; every other video is paused. */
+  function activate(cell) {
+    if (active === cell) return;
+    if (active) active.classList.remove("is-active");
+    active = cell;
+    cell.classList.add("is-active");
+    col.querySelectorAll(".feed-media video").forEach(video => { if (!cell.contains(video)) video.pause(); });
+    [cell, cell.nextElementSibling].forEach(near => {
+      const video = near && near.querySelector(".feed-media video");
+      if (video) { video.preload = "auto"; video.__loadSource(); }
+    });
+    const video = cell.querySelector(".feed-media video");
+    if (video && document.visibilityState === "visible") start(video);
+  }
+  const stage = new IntersectionObserver(entries => entries.forEach(entry => {
+    if (entry.isIntersecting && entry.intersectionRatio >= 0.6) { activate(entry.target); return; }
+    entry.target.querySelectorAll("video").forEach(video => video.pause());
+    if (active === entry.target) { active.classList.remove("is-active"); active = null; }
+  }), { root: col, threshold: [0, 0.6, 1] });
+  function onVisibility() {
+    const video = active && active.querySelector(".feed-media video");
+    if (!video) return;
+    if (document.visibilityState !== "visible") { resume = !video.paused; video.pause(); }
+    else if (resume) { resume = false; start(video); }
+  }
+  document.addEventListener("visibilitychange", onVisibility);
 
   function move(index) {
     const cells = col.querySelectorAll("[data-idx]");
@@ -60,21 +107,33 @@ export function mountFeed(host) {
       cell.tabIndex = 0;
       const mediaBox = media(item, { root: col, eager: index === 0 });
       mediaBox.className = "feed-media";
+      const video = mediaBox.querySelector("video");
+      if (video) {
+        video.muted = muted;
+        // Loops like a short-video feed; replaying after ended keeps each pass its own watch stream.
+        video.addEventListener("ended", () => { if (cell === active) video.play().catch(() => {}); });
+        video.addEventListener("volumechange", () => { if (cell === active && video.muted !== muted) setMuted(video.muted, true); });
+        const mute = document.createElement("button");
+        mute.type = "button"; mute.className = "feed-mute"; mute.setAttribute("aria-label", "Sound"); mute.title = "Sound (M)";
+        paintMute(mute);
+        mute.onclick = () => setMuted(!muted, true);
+        mediaBox.appendChild(mute);
+      }
       const side = document.createElement("div");
       side.className = "card-side";
       const title = document.createElement("h2"); title.className = "card-title"; title.textContent = item.title || ("Item " + item.id);
       const why = explanation(item);
-      const reason = document.createElement("p"); reason.className = "card-reason"; reason.textContent = whyText(item, reason, mediaBox.querySelector("video"));
+      const reason = document.createElement("p"); reason.className = "card-reason"; reason.textContent = whyText(item, reason, video);
       const next = document.createElement("button"); next.type = "button"; next.className = "action primary";
       next.append(icon("next"), "Next"); next.onclick = () => move(index + 1);
       const extras = [next];
       if (item.kind === "video") extras.push(similarLink(item, false));
       const hint = document.createElement("p"); hint.className = "feed-hint";
-      hint.innerHTML = "<kbd>J</kbd> <kbd>K</kbd> or arrows to move, <kbd>Space</kbd> to play, <kbd>L</kbd> <kbd>D</kbd> to rate";
-      side.append(title, evidenceStrip(item, why, { legend: true }), reason, metaLine(item, mediaBox.querySelector("video")), feedbackControls(item, { extras }), why, hint);
+      hint.innerHTML = "<kbd>J</kbd> <kbd>K</kbd> or arrows to move, <kbd>Space</kbd> to pause, <kbd>M</kbd> for sound, <kbd>L</kbd> <kbd>D</kbd> to rate";
+      side.append(title, evidenceStrip(item, why, { legend: true }), reason, metaLine(item, video), feedbackControls(item, { extras }), why, hint);
       cell.append(mediaBox, side);
       if (row) col.insertBefore(cell, row); else col.appendChild(cell);
-      offscreen.observe(cell);
+      stage.observe(cell);
       const observer = observeView(cell, item, index, "feed");
       if (observer) state.observers.push(observer);
     });
@@ -126,6 +185,7 @@ export function mountFeed(host) {
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     if (key === "ArrowDown" || key === "j") { event.preventDefault(); move(index + 1); }
     else if ((key === "ArrowUp" || key === "k") && index > 0) { event.preventDefault(); move(index - 1); }
+    else if (key === "m") { event.preventDefault(); setMuted(!muted, true); }
     else if ((key === "l" || key === "d") && current) { event.preventDefault(); current.querySelector(key === "l" ? "[data-ai-feedback='like']" : "[data-ai-feedback='dislike']").click(); }
     else if (key === " " && current) {
       const video = current.querySelector("video");
@@ -133,5 +193,5 @@ export function mountFeed(host) {
     }
   });
   fetchMore();
-  return { dispose() { state.generation++; feedState(null); offscreen.disconnect(); if (col.__nearObserver) col.__nearObserver.disconnect(); state.observers.forEach(o => o.disconnect()); }, state, fetchMore };
+  return { dispose() { state.generation++; feedState(null); stage.disconnect(); stopVideos(host); document.removeEventListener("visibilitychange", onVisibility); if (col.__nearObserver) col.__nearObserver.disconnect(); state.observers.forEach(o => o.disconnect()); }, state, fetchMore };
 }

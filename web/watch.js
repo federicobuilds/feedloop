@@ -33,10 +33,12 @@ export function observeView(element, item, position, surface, onViewed) {
   return { disconnect() { disposed = true; cancel(); observer.disconnect(); document.removeEventListener("visibilitychange", onVisibility); } };
 }
 
-/* One stream per playback: start once, then progress every few seconds and on pause/end.
+/* One stream per playback: it starts on the first play or timeupdate after the view
+   qualified (an autoplayed player is often playing before then), posts progress every few
+   seconds, and closes on pause or end, so a resumed or looped playback opens a new stream.
    Each batch is posted with the positions the player reported; nothing is estimated. */
 export function attachPlayer(video, item) {
-  let stream = null, previous = null, sent = 0;
+  let stream = null, previous = null, last = 0;
   function event(type) {
     const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null;
     if (duration === null || !item.viewed_event_id) return null;
@@ -51,17 +53,26 @@ export function attachPlayer(video, item) {
       video.setAttribute("data-ai-watch", result && (result.status === "imported" || result.status === "duplicate") ? result.status : "unconfirmed");
     }).catch(() => video.setAttribute("data-ai-watch", "unconfirmed"));
   }
-  video.addEventListener("play", () => {
-    if (!stream) { stream = "stream-" + newId(); const row = event("view_start"); if (row) flush([row]); }
-  });
-  let last = 0;
+  function begin() {
+    if (stream || video.paused) return;
+    stream = "stream-" + newId(); last = video.currentTime;
+    const row = event("view_start");
+    if (row) flush([row]); else stream = null;
+  }
+  video.addEventListener("play", begin);
   video.addEventListener("timeupdate", () => {
-    if (!stream || video.currentTime - last < 4) return;
-    last = video.currentTime; sent++;
+    if (!stream) { begin(); return; }
+    if (video.currentTime - last < 4) return;
+    last = video.currentTime;
     const row = event("view_progress"); if (row) flush([row]);
   });
-  ["pause", "ended"].forEach(name => video.addEventListener(name, () => {
+  // Pause and ended may arrive in either order; whichever comes first closes the stream.
+  function close() {
     if (!stream) return;
-    const row = event(name === "ended" ? "view_complete" : "view_pause"); if (row) flush([row]);
-  }));
+    const row = event(video.ended ? "view_complete" : "view_pause"); if (row) flush([row]);
+    stream = null; previous = null;
+  }
+  video.addEventListener("pause", close);
+  video.addEventListener("ended", close);
+  video.__closeWatch = close;
 }

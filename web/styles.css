@@ -106,6 +106,9 @@ h1[tabindex="-1"]:focus, h1[tabindex="-1"]:focus-visible { outline: none; box-sh
 .feed-cell:focus-visible { outline-offset: -4px; }
 .feed-media { position: relative; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #000; }
 .feed-media video, .feed-media img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.feed-mute { position: absolute; top: 12px; right: 12px; z-index: 1; width: 40px; padding: 0; background: rgba(10, 11, 13, .72); }
+.feed-cell.is-active .card-side { animation: feed-in 120ms ease-out; }
+@keyframes feed-in { from { opacity: 0; } }
 .placeholder { color: var(--ink-2); font-size: var(--t-12); padding: 24px; }
 .card-side { min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding: 24px; background: var(--panel); border-left: 1px solid var(--rule); scrollbar-width: thin; }
 .card-title { font-size: var(--t-20); overflow-wrap: anywhere; }

@@ -5,7 +5,7 @@
    building panel; an empty result, a partial result and a missing feature stay distinct. */
 import { getJSON, isAbort } from "./api.js";
 import { announce, formatNumber, partial, setState } from "./state.js";
-import { gridCard } from "./cards.js";
+import { gridCard, stopVideos } from "./cards.js";
 
 const MODE_WORDS = { look: "look", sound: "sound", both: "look and sound" };
 
@@ -142,5 +142,5 @@ export function mountSearch(host) {
     field.value = prefixFor(initial.mode) + initial.words; prefixed = initial.mode !== "look";
     run(initial.words, initial.mode);
   }
-  return { dispose() { generation++; if (controller) controller.abort(); }, run };
+  return { dispose() { generation++; stopVideos(host); if (controller) controller.abort(); }, run };
 }

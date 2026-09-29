@@ -101,17 +101,19 @@ and works offline. It calls only the server's public routes (`/api/feed`,
 `/media/`.
 
 - Feed: one full-height item at a time, with a black stage for the player and
-  a side panel. A video opens at its matching moment. The panel shows the
+  a side panel. A video opens at its matching moment and plays automatically, muted until you turn sound on with M or the sound button; that choice is remembered. The next video is preloaded and videos loop. The panel shows the
   title, an evidence strip (one segment per signal, sized by contribution;
   an unmeasured signal is hatched, never zero), a reason line in words, and
   one metadata line. Like and Dislike are toggles; pressing an active one
   clears the rating, with Undo next to the confirmation. A More disclosure
   holds Clear rating and Count engagement, each explained in one line. Next
   moves on; More like this opens Similar. Move with the arrow keys or J and
-  K, rate with L and D. Space plays or pauses. A video that scrolls out of
+  K, rate with L and D. Space or a tap pauses, and a video that scrolls out of
   view pauses.
-- Home: horizontal shelves, one per category the ranker recorded, with item
-  counts, Load more, and a skeleton while loading. Hovering a card plays a
+- Home: horizontal shelves named for why their picks were chosen: Continue watching, Because you watched <title>,
+  Because you like <tag>, Something new, New to you, and category shelves
+  otherwise. Each shelf shows item counts, Load more, and a skeleton while
+  loading. Hovering a card plays a
   muted preview after a short delay. Clicking it turns the card into the
   player. Only that player counts as watching; the preview does not. An
   empty library explains how to add media and sidecars.

@@ -75,7 +75,7 @@ export function similarLink(item, compact) {
 /* One observer per scroll root assigns a video its source once it is within 600 px. */
 let viewportObserver = null;
 function nearSource(video, url, root) {
-  const load = () => { video.src = url; };
+  const load = () => { if (!video.getAttribute("src")) video.src = url; };
   if (!("IntersectionObserver" in window)) { load(); return; }
   let observer = root ? root.__nearObserver : viewportObserver;
   if (!observer) {
@@ -88,6 +88,17 @@ function nearSource(video, url, root) {
   }
   video.__loadSource = load;
   observer.observe(video);
+}
+
+/* A view being left stops its players: the stream closes now, while the player still knows
+   its position, and the source is dropped so detached media cannot keep playing. */
+export function stopVideos(root) {
+  root.querySelectorAll("video").forEach(video => {
+    video.pause();
+    if (video.__closeWatch) video.__closeWatch();
+    video.removeAttribute("src");
+    video.load();
+  });
 }
 
 function openVideo(video, item, root) {
