@@ -1,10 +1,10 @@
-/* Home: shelves by category with an explicit Load more. Cards keep their identity across
+/* Home: shelves by the server's insight sentence (else category) with an explicit Load more. Cards keep their identity across
    appends; a refused cursor restarts once and keeps the shelves; the restart budget
    re-arms only when a new card lands on a shelf. A skeleton shelf holds the space until
    the first page lands; completed loads are announced in a persistent polite region. */
 import { deliverFeed, isStaleCursor, itemKey } from "./api.js";
 import { announce, building, formatNumber, partial, setState } from "./state.js";
-import { gridCard } from "./cards.js";
+import { gridCard, stopVideos } from "./cards.js";
 import { observeView } from "./watch.js";
 import { icon } from "./icons.js";
 
@@ -24,7 +24,7 @@ export function mountHome(host) {
   const view = document.createElement("div");
   view.className = "view";
   view.setAttribute("aria-label", "Home");
-  view.innerHTML = '<div class="view-head"><h1>Home</h1><p>Your picks, grouped by the category the ranker recorded for each one.</p></div>';
+  view.innerHTML = '<div class="view-head"><h1>Home</h1><p>Your picks, grouped by why each one was picked.</p></div>';
   const status = document.createElement("div"); status.setAttribute("data-ai-home-status", "1");
   const body = document.createElement("div"); body.setAttribute("data-ai-home-body", "1");
   const done = document.createElement("p"); done.className = "sr-only"; done.setAttribute("role", "status");
@@ -76,7 +76,7 @@ export function mountHome(host) {
     items.forEach(item => {
       const key = itemKey(item);
       if (state.used[key]) return;
-      const section = shelf(item.category || item.kind);
+      const section = shelf(item.shelf || item.category || item.kind);
       const card = gridCard(item, { headingLevel: 3, eager: state.count === 0 });
       card.setAttribute("role", "listitem");
       section.querySelector(".shelf-row").appendChild(card);
@@ -130,5 +130,5 @@ export function mountHome(host) {
 
   loadMore.onclick = () => { if (loadMore.getAttribute("aria-disabled") !== "true") load(); };
   load();
-  return { dispose() { state.generation++; building(status, false); state.observers.forEach(o => o.disconnect()); }, state, load };
+  return { dispose() { state.generation++; stopVideos(host); building(status, false); state.observers.forEach(o => o.disconnect()); }, state, load };
 }

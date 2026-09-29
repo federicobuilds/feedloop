@@ -434,6 +434,14 @@ class Engine:
             category = (ranking.dominant_category(vectors.get(key, {}), categories, weights, config["bodyparts_weight"])
                         if key[0] == self.primary else key[0])
             explanation["dominant_category"] = category
+            # 2026-09-29: explanation only, for the Home shelves; read from rows this call already holds
+            watched = float(((signals["rows"].get(key) or {}).get("watch") or {}).get("watched_s") or 0.0)
+            seconds = float(source.get("duration_s") or 0.0)
+            if key[0] == self.primary and watched > 0 and seconds > 0:
+                explanation["watch_fraction"] = min(watched / seconds, 1.0)
+            nearest = explanation.get("nearest_like")
+            if nearest and (rows.get((nearest["kind"], nearest["id"])) or {}).get("title"):
+                explanation["nearest_like"] = {**nearest, "title": rows[(nearest["kind"], nearest["id"])]["title"]}
             items.append({"kind": key[0], "id": key[1], "score": row["score"], "explanation": explanation, "best_t": row.get("best_t"),
                           "title": source.get("title"), "media_url": source.get("media_url"),
                           "duration_s": float(source.get("duration_s") or 0.0), "category": category, "source_rank": position})

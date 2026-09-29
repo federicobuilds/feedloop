@@ -27,6 +27,8 @@ POOL_RANK_CAP_S = 600.0  # a tag's seconds counted by the rough candidate score
 FATIGUE_CAP = 10  # view days counted by the secondary lane's fatigue
 EXPLORE_MIN_S = 30.0  # seconds outside the profile an explore pick needs
 COOLDOWN_HARD_SHARE = 6.0  # items watched within cooldown_days / this are never candidates
+NEAREST_LIKE_MIN = 0.8  # look cosine a pick needs to its closest liked item to name it
+NEAREST_LIKE_CAP = 200  # most recently watched likes a pick is compared against
 BODYPARTS = "bodyparts"
 LEGACY_LOOK = "means"  # the single look space hosts named before space_roles
 
@@ -408,6 +410,22 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
             "cooldown_multiplier": round(cooldown, 3), "impression_multiplier": round(pen, 3),
             "duration_s": round(duration, 1),
             "days_since_watch": None if not w or w["days"] > 1e5 else round(w["days"], 1), "dominant_category": cat}
+
+    # the MMR redundancy view: the look view, else the visual space alone
+    sim_ids, sim_m, sim_index = (means_ids, means_m, means_index) if means_m is not None else matrices.get(visual_space, primary)
+
+    # 2026-09-29: explanation only, for the Home "Because you watched" shelf: the one liked item
+    # a look-sourced pick sits closest to; no score, order or knob reads it
+    likes = [sid for sid in sorted(liked_primary, key=lambda sid: ((watch.get(sid) or {}).get("days", np.inf), sid))
+             if sim_m is not None and sid in sim_index][:NEAREST_LIKE_CAP]
+    looked = [key for key, d in details.items() if likes and "visual" in d["sources"] and key[1] in sim_index]
+    if looked:
+        cos = sim_m[[sim_index[sid] for _kind, sid in looked]] @ sim_m[[sim_index[sid] for sid in likes]].T
+        cos[np.array([sid for _kind, sid in looked])[:, None] == np.array(likes)[None, :]] = -np.inf
+        best = cos.argmax(axis=1)
+        for row, key in enumerate(looked):
+            if cos[row, best[row]] > NEAREST_LIKE_MIN:
+                details[key]["nearest_like"] = {"kind": primary, "id": likes[best[row]], "cosine": round(float(cos[row, best[row]]), 4)}
     want = max(pool_size, len(comps))
     target_shares = ranking.category_shares(weights, tag_category, bodyparts_weight)
 
@@ -468,9 +486,6 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
                                 enumerate_ids=lambda: [key[1] for key in catalog["present"] if key[0] == secondary])
             keys += [(secondary, iid) for iid in iids if (secondary, iid) in catalog["present"]]
         return keys
-
-    # the MMR redundancy view: the look view, else the visual space alone
-    sim_ids, sim_m, sim_index = (means_ids, means_m, means_index) if means_m is not None else matrices.get(visual_space, primary)
 
     def similarity(keys):
         # cosines of unit look rows, rescaled so the pool's mean pairwise cosine is 0 and identity

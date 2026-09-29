@@ -200,6 +200,45 @@ def tag_names_for(explanation, names: Mapping[int, str], limit=3):
     return tags, all_names
 
 
+SHELF_MIN, SHELF_MAX = 3, 8
+
+
+def shelf_label(explanation, names: Mapping[int, str]):
+    """The insight sentence an item's own explanation supports, or None.
+
+    2026-09-29: a named liked seed on a look-sourced pick wins over the tag rule; the look
+    cosine and a tag's contribution share no scale, so the simple rule is to prefer it."""
+    if explanation.get("explore"):
+        return "Something new"
+    if 0 < (explanation.get("watch_fraction") or 0) < 0.9:
+        return "Continue watching"
+    seed = explanation.get("nearest_like") or {}
+    if seed.get("title") and "visual" in (explanation.get("sources") or ()):
+        return f"Because you watched {seed['title']}"
+    positive = sorted((c for c in explanation.get("tag_contributions") or () if c.get("contribution", 0.0) > 0),
+                      key=lambda c: -c["contribution"])
+    name = next((n for n in (names.get(c.get("tag_id")) for c in positive) if n and not str(n).isdigit()), None)
+    if name:
+        return f"Because you like {name}"
+    if explanation.get("fallback") or "fallback" in (explanation.get("sources") or ()):
+        return "New to you"
+    return None
+
+
+def assign_shelves(items, names: Mapping[int, str]):
+    """One shelf per item: its insight sentence when at least SHELF_MIN items share it and it
+    is among the first SHELF_MAX insight shelves, else its category.
+
+    2026-09-29: the minimum size applies per page, so a later page's small group lands on its
+    category; each item's sentence depends only on its own explanation, so a shelf name means
+    the same thing on every page of a generation."""
+    labels = [shelf_label(item.get("explanation") or {}, names) for item in items]
+    kept = [label for label in dict.fromkeys(labels) if label and labels.count(label) >= SHELF_MIN][:SHELF_MAX]
+    for item, label in zip(items, labels):
+        item["shelf"] = label if label in kept else item["category"]
+    return items
+
+
 def ranking_response(items, total, has_more, offset, *, next_offset=None, kinds=DEFAULT_KINDS):
     """Continuation envelope from generating facts, never a newly minted delivery id."""
     provenance = copy.deepcopy(items[0].get("provenance")) if items else None
@@ -290,6 +329,7 @@ def build_feed(ranked, *, names, offset, kinds=DEFAULT_KINDS):
                       "tags": tags, "tag_names": tag_names, "duration": round(dur, 1), "best_t": best_t,
                       "category": sc.get("category") or "other", "explore": bool(m.get("explore")),
                       "control": bool(m.get("control")), "rating100": sc.get("rating100")})
+    assign_shelves(items, names)
     components = dict(d.get("components") or {})
     has_more = d.get("has_more", False)
     next_offset, next_cursor = d.get("next_offset"), d.get("next_cursor")
