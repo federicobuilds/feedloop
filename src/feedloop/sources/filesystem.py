@@ -165,6 +165,7 @@ class FilesystemSource:
         self._scan: dict | None = None
         self._scanned_at = -math.inf
         self._space_cache: dict[str, tuple] = {}
+        self._matrix_cache: dict[str, tuple] = {}
         with self._connection(write=True) as conn:
             for statement in _SCHEMA:
                 conn.execute(statement)
@@ -433,7 +434,7 @@ class FilesystemSource:
     # --------------------------------------------------------------- signals
     def read(self, keys=None):
         """Authoritative rows as of the last write to them; ``observed_at`` is that write
-        time, never the moment of reading."""
+        time, never the moment of reading, and each row's ``updated_at`` is its own last write."""
         scan = self._scanned()
         with self._connection() as conn:
             observed_at = float(conn.execute("SELECT value FROM meta WHERE name='signals_written_ts'").fetchone()[0])
@@ -442,7 +443,8 @@ class FilesystemSource:
             for row in conn.execute("SELECT * FROM signals"):
                 key = (row["kind"], row["id"])
                 if wanted is None or key in wanted:
-                    rows[key] = {"rating": row["rating"], "engagement_count": int(row["engagement_count"])}
+                    rows[key] = {"rating": row["rating"], "engagement_count": int(row["engagement_count"]),
+                                 "updated_at": float(row["updated_ts"])}
             watch = {}
             for row in conn.execute("SELECT * FROM watch ORDER BY at_ts"):
                 key = (row["kind"], row["id"])
@@ -452,9 +454,11 @@ class FilesystemSource:
             intervals = _merge([(float(s["start_s"]), float(s["end_s"])) for s in steps if s["end_s"] > s["start_s"]])
             if not intervals:
                 continue
-            rows.setdefault(key, {"rating": None, "engagement_count": 0})["watch"] = {
-                "watched_s": float(sum(b - a for a, b in intervals)), "last_at": float(max(s["at_ts"] for s in steps)),
-                "visit_days": sorted({_utc_day(float(s["at_ts"])) for s in steps}), "intervals": intervals}
+            last_at = float(max(s["at_ts"] for s in steps))
+            row = rows.setdefault(key, {"rating": None, "engagement_count": 0, "updated_at": last_at})
+            row["updated_at"] = max(row["updated_at"], last_at)
+            row["watch"] = {"watched_s": float(sum(b - a for a, b in intervals)), "last_at": last_at,
+                            "visit_days": sorted({_utc_day(float(s["at_ts"])) for s in steps}), "intervals": intervals}
         return {"observed_at": observed_at, "rows": rows}
 
     def read_current(self, key):
@@ -649,10 +653,20 @@ class FilesystemSource:
         present = self._scanned()["items"]
         keys = [(k, int(i)) for k, _, i in (str(v).partition(":") for v in data["keys"])]
         rows = [n for n, key in enumerate(keys) if key in present]
+        # 2026-09-29 (R1): the same filtered array while the file and its present rows hold, so
+        # the pipeline's identity-keyed KindMatrices cache hits instead of renormalizing a space
+        cache_key = (self._space_cache[space][0], tuple(rows))
+        cached = self._matrix_cache.get(space)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
         matrix = np.asarray(data["matrix"], dtype=np.float32)
         if matrix.ndim != 2 or matrix.shape[0] != len(keys) or not np.isfinite(matrix).all():
             return None
-        return [keys[n] for n in rows], matrix[rows]
+        filtered = matrix[rows]
+        filtered.setflags(write=False)
+        result = ([keys[n] for n in rows], filtered)
+        self._matrix_cache[space] = (cache_key, result)
+        return result
 
     def revision(self, space):
         meta = self._read_space_meta(space)

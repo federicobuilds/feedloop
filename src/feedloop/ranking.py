@@ -475,7 +475,7 @@ class _CosineBatch:
         return sims
 
 
-def select(scored, *, want, diversity, calibration, target_shares, details=None):
+def select(scored, *, want, diversity, calibration, target_shares, details=None, similarity=None):
     """Incremental MMR; strict comparisons preserve input tie order.
 
     2026-09-16: each candidate's norm is reduced once per call, not once per
@@ -484,6 +484,9 @@ def select(scored, *, want, diversity, calibration, target_shares, details=None)
     2026-09-28: each step's similarities to the last pick run as one numpy batch
     (FEEDLOOP-PERF-2: the per-pair generator was about 25 s of a warm feed);
     bit-identical to cosine_normed() per pair.
+    2026-09-29 (polish C follow-up): tag cosine alone left a page of one embedding cluster when
+    the clusters' tags differ; an optional similarity(keys) -> (n, n) cosine matrix makes the
+    redundancy term max(tag cosine, embedding cosine). Without it the selection is unchanged.
     """
     chosen = []
     last, last_norm = None, 0.0
@@ -494,9 +497,12 @@ def select(scored, *, want, diversity, calibration, target_shares, details=None)
     alive = list(range(len(pool)))
     max_sims = [0.0] * len(pool)
     scale = abs(scored[0][0] if scored else 1.0) or 1.0
+    embedded = similarity([sid for _rel, sid, _vec, _cat in pool]) if similarity is not None and pool else None
     while pool and len(chosen) < want:
         best_idx, best_val, best_trace = 0, -1e18, None
         sims = batch.similarities(np.array(alive, dtype=np.int64), last, norms, last_norm) if chosen else None
+        if sims is not None and embedded is not None:
+            sims = np.maximum(sims, embedded[alive, last]).tolist()
         for idx, (rel, sid, vec, cat) in enumerate(pool):
             if chosen:
                 sim = sims[idx]
@@ -667,7 +673,7 @@ def fingerprint_groups(rows, kinds=DEFAULT_KINDS):
 def rank_page(comps, image_comps, *, config, target_shares, seed, allowed, excluded,
               duplicate_groups, seeds=(), explanations=None, admitted=None,
               fallback=(), fallback_reasons=(), explore=(), control=(),
-              page_size=20, offset=0, limit=20, kinds=DEFAULT_KINDS):
+              page_size=20, offset=0, limit=20, kinds=DEFAULT_KINDS, similarity=None):
     """One scoring, selection, mixed-kind pagination path for serving and replay.
 
     Counts and cursors refer to the complete bounded generation, not a page's
@@ -699,7 +705,8 @@ def rank_page(comps, image_comps, *, config, target_shares, seed, allowed, exclu
         images.sort(key=lambda key: (-scores[key], key))
         scoring_seconds += time.perf_counter() - started
         primaries = select(scored, want=len(scored), diversity=knobs["diversity"],
-                           calibration=knobs["calibration"], target_shares=target_shares, details=trace)
+                           calibration=knobs["calibration"], target_shares=target_shares, details=trace,
+                           similarity=similarity)
         return eligible(interleave_kinds(primaries, images, len(primaries) + len(images), config["images_share"])), scores
     chosen, scores = arm(config, details)
     experiment = config.get("experiment")

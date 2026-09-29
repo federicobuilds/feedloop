@@ -476,10 +476,22 @@ def build_scorecard(tuner: tuning.Tuner, *, ledger_path, clock=time.time):
         items = {(row["kind"], row["item_id"]) for row in evidence.get("events", []) if row["event_id"] in viewed}
         cumulative = tuner.cumulative_facts(items, evidence["through_ts"])
     summary = tuner.summarize_trials(evidence, verdict=tuner.verdict, trial_reward=tuner.reward, cumulative_at_cutoff=cumulative)
-    promotion = (evidence.get("valid") is True and evidence.get("promotion_enabled") is True
-                 and summary.get("valid") is True and summary.get("promotion_enabled") is True)
+    promotion_reasons = list(dict.fromkeys(evidence.get("promotion_reasons", ["attributed_evidence_unavailable"])
+                                           + summary.get("promotion_reasons", [])))
+    if tuner.automatic:
+        # 2026-09-29: automatic promotion is on (owner decision 2026-09-13); tick promotes on
+        # decide() alone, so the ledger's report-only flags neither gate it nor show as reasons.
+        promotion_reasons = [code for code in promotion_reasons
+                             if code not in ("automatic_promotion_disabled", "session_evidence_policy_required")]
+        # 2026-09-29: eligibility reads evidence exactly as the next tick does (through the ripen
+        # boundary), so trials inside the ripen window never make the page eligible.
+        _ripe, report = tuner.ripe_report(since, now=now)
+        promotion = report is not None and tuning.decide(report, now=now, window_started=since)[0] == "promote"
+    else:
+        promotion = (evidence.get("valid") is True and evidence.get("promotion_enabled") is True
+                     and summary.get("valid") is True and summary.get("promotion_enabled") is True)
     # 2026-09-16: per-trial facts are shown whenever the evidence read succeeded; the
-    # validity reasons and gates above stay separate and promotion_eligible stays False.
+    # validity reasons and gates above stay separate.
     arm_summary = {}
     if summary.get("status") == "ok":
         for arm in ("base", "cand"):
@@ -496,8 +508,7 @@ def build_scorecard(tuner: tuning.Tuner, *, ledger_path, clock=time.time):
         "evidence": {"valid": evidence.get("valid") is True and summary.get("valid") is True,
                      "status": evidence.get("status", "unavailable"), "through_ts": evidence.get("through_ts"),
                      "validity_reasons": list(dict.fromkeys(evidence.get("validity_reasons", []) + summary.get("validity_reasons", []))),
-                     "promotion_reasons": list(dict.fromkeys(evidence.get("promotion_reasons", ["attributed_evidence_unavailable"])
-                                                             + summary.get("promotion_reasons", [])))},
+                     "promotion_reasons": promotion_reasons},
         "trials": summary.get("trials", []),
         "tuner": {"knob": active, "rotation": [e["knob"] for e in tuner.registry], "stalls": state[1] if state else None,
                   "tuned_values": tuned, "default": tuning.knob_default(active) if entry else None,

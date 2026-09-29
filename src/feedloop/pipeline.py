@@ -28,6 +28,7 @@ FATIGUE_CAP = 10  # view days counted by the secondary lane's fatigue
 EXPLORE_MIN_S = 30.0  # seconds outside the profile an explore pick needs
 COOLDOWN_HARD_SHARE = 6.0  # items watched within cooldown_days / this are never candidates
 BODYPARTS = "bodyparts"
+LEGACY_LOOK = "means"  # the single look space hosts named before space_roles
 
 
 def tag_limit(config):
@@ -54,13 +55,15 @@ NO_VIEW = (None, None, None)
 def _unit_view(ids, rows):
     # 2026-09-29 (E-7): the slot allows non-unit finite rows, so similarity would follow row
     # length; rows are scaled to unit once here and zero rows leave the view entirely
-    rows = np.asarray(rows, dtype=np.float32)
+    # 2026-09-29 (R2): float32 norms overflow on large finite rows and underflow on tiny ones,
+    # so the norm and the division run in float64 and only the unit rows are float32
+    rows = np.asarray(rows, dtype=np.float64)
     norms = np.linalg.norm(rows, axis=1)
     keep = norms > 0
     if not keep.any():
         return NO_VIEW
     ids = [sid for sid, kept in zip(ids, keep) if kept]
-    return ids, rows[keep] / norms[keep, None], {sid: row for row, sid in enumerate(ids)}
+    return ids, (rows[keep] / norms[keep, None]).astype(np.float32), {sid: row for row, sid in enumerate(ids)}
 
 
 class KindMatrices:
@@ -105,6 +108,14 @@ class KindMatrices:
     def paired(self, first, second, kind):
         """The look view: each item's unit first-space and second-space rows side by side over
         sqrt(2), the width the paired frame windows are scored in."""
+        view = self._paired(first, second, kind)
+        # 2026-09-29 (K3): a host with one space named "means" lost its look view when reads went
+        # through roles; that space stands in whenever the paired view is unavailable
+        if view[0] is None and LEGACY_LOOK not in (first, second) and self._loaded(LEGACY_LOOK) is not None:
+            return self.get(LEGACY_LOOK, kind)
+        return view
+
+    def _paired(self, first, second, kind):
         a, b = self._loaded(first), self._loaded(second)
         if a is None or b is None:
             return NO_VIEW
@@ -225,6 +236,9 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
     # 2. candidates: cooldown/6 floor, positive-tag tops, negative seconds before the cut
     hard_exclude = {sid for sid, w in watch.items() if w["days"] < cooldown_days / COOLDOWN_HARD_SHARE}
     hard_exclude.update(exclude_primary)
+    # 2026-09-29 (polish C-a): an explicitly disliked item was served again when it had no watch
+    # row to rest it; like the secondary lane, it never returns
+    hard_exclude.update(sid for sid, fact in facts.items() if fact["is_dislike"] and fact["explicit"])
     hard_exclude.update(seed_ids)
     allowed_set = None if allowed is None else set(allowed)
     positive_tags = [t for t, w in weights.items() if w > 0]
@@ -455,6 +469,21 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
             keys += [(secondary, iid) for iid in iids if (secondary, iid) in catalog["present"]]
         return keys
 
+    # the MMR redundancy view: the look view, else the visual space alone
+    sim_ids, sim_m, sim_index = (means_ids, means_m, means_index) if means_m is not None else matrices.get(visual_space, primary)
+
+    def similarity(keys):
+        # cosines of unit look rows, rescaled so the pool's mean pairwise cosine is 0 and identity
+        # is 1: embedding spaces are anisotropic (unrelated items often sit near 0.6), and raw
+        # cosine made every candidate look redundant with every pick. A key without a row is
+        # similar to nothing.
+        rows = np.array([sim_index.get(sid, -1) if kind == primary else -1 for kind, sid in keys], dtype=np.int64)
+        have = rows >= 0
+        cos = sim_m[np.maximum(rows, 0)].astype(np.float64) @ sim_m[np.maximum(rows, 0)].astype(np.float64).T
+        pairs = have.sum() * (have.sum() - 1)
+        base = min((cos[np.ix_(have, have)].sum() - have.sum()) / pairs, 0.999) if pairs else 0.0
+        return np.clip((cos - base) / (1.0 - base), 0.0, 1.0) * np.outer(have, have)
+
     def windows(keys):
         ids = [key[1] for key in keys if key[0] == primary]
         times = best_windows(profile_vec, ids, read=windows_read, revision=windows_revision, cache=windows_cache) if profile_vec is not None else {}
@@ -466,4 +495,5 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
             "control": [(primary, sid) for sid in control_ids if (primary, sid) in duration_of],
             "fallback": fallback, "fallback_reasons": fallback_reasons + ["no_positive_feature_match"],
             "profile": {**profile_meta, "weights": dict(weights)},
-            "source_counts": {name: len(ids) for name, ids in sources.items()}, "windows": windows}
+            "source_counts": {name: len(ids) for name, ids in sources.items()}, "windows": windows,
+            "similarity": similarity if sim_m is not None else None}

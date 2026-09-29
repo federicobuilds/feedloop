@@ -79,6 +79,9 @@ _EVENT_FIELDS = (
     "request_id", "parent_id", "corrects_id", "source", "source_event_id", "payload_json",
     "canonical_session_id", "session_mapping_revision",
 )
+# 2026-09-29 (K2): the fatigue window reads views by time; the partial index lets it SEARCH the
+# range instead of filtering every view. Also created on each write open so existing stores gain it.
+_VIEW_TIME_INDEX = "CREATE INDEX IF NOT EXISTS rec_view_time ON rec_events(occurred_at) WHERE event_type='viewed'"
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS rec_metadata (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -140,6 +143,7 @@ _SCHEMA = (
     "CREATE UNIQUE INDEX IF NOT EXISTS rec_one_view ON rec_events(parent_id) WHERE event_type='viewed'",
     "CREATE UNIQUE INDEX IF NOT EXISTS rec_one_correction ON rec_events(corrects_id) WHERE corrects_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS rec_item_time ON rec_events(session_id,kind,item_id,occurred_at)",
+    _VIEW_TIME_INDEX,
     """CREATE TABLE IF NOT EXISTS rec_event_receipts (
         source TEXT NOT NULL, source_event_id TEXT NOT NULL,
         event_id TEXT NOT NULL REFERENCES rec_events(event_id), submitted_json TEXT NOT NULL,
@@ -312,6 +316,8 @@ def _connection(db_path, *, write=False, initialize=False):
         if not initialize:
             row = conn.execute("SELECT * FROM rec_metadata WHERE singleton=1").fetchone()
             _require(row is not None and row["schema_version"] == SCHEMA_VERSION, "schema_unavailable")
+            if write:
+                conn.execute(_VIEW_TIME_INDEX)
         yield conn
         conn.commit()
         if write:
@@ -1224,14 +1230,15 @@ def read_view_counts(db_path: str, *, since_ts: float, through_ts: float,
         return _unavailable(str(exc))
 
 
-_QUALIFIED_VIEWS_SQL = """SELECT event_id,kind,item_id,occurred_at,received_at FROM rec_events INDEXED BY rec_one_view
+_QUALIFIED_VIEWS_SQL = """SELECT event_id,kind,item_id,occurred_at,received_at FROM rec_events
     WHERE event_type='viewed' AND parent_id IS NOT NULL AND occurred_at>=? AND occurred_at<=? AND received_at<=?
     ORDER BY occurred_at,rowid"""
 
 
 def read_qualified_views(db_path: str, *, since_ts: float, through_ts: float) -> dict[str, Any]:
     """Viewed events inside [since_ts, through_ts] known by through_ts, without decoding payloads.
-    Every view has a served parent, so the rec_one_view partial index covers all of them."""
+    The planner SEARCHes the rec_view_time partial index by occurred_at; a store not yet
+    opened for write lacks it and still answers, by a slower plan."""
     _number(since_ts)
     _number(through_ts)
     _require(since_ts <= through_ts, "invalid_window")

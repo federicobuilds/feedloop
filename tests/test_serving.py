@@ -598,10 +598,49 @@ class TestDashboardSharedContracts:
         eng.tuner.summarize_trials = Mock(return_value=summary)
         card = eng.scorecard()
         assert card["evidence"]["validity_reasons"] == ["cumulative_verdict_unavailable"]
-        assert card["evidence"]["promotion_reasons"] == ["session_evidence_policy_required"]
+        assert card["evidence"]["promotion_reasons"] == [], "automatic tuning is not gated by the session evidence policy"
         assert card["tuner"]["promotion_eligible"] is False
         summary.update(valid=True, validity_reasons=[], promotion_reasons=[])
-        assert eng.scorecard()["tuner"]["promotion_eligible"] is False, "a green summary is not the report-only promotion flag"
+        assert eng.scorecard()["tuner"]["promotion_eligible"] is False, "a green summary without trials does not pass decide()"
+
+    def test_automatic_promotion_eligibility_matches_the_next_tick(self, tmp_path, clock):
+        eng = make_engine(tmp_path, clock[1])
+        with eng.tuner.transaction() as conn:
+            conn.execute("UPDATE arms SET since_ts=?", (NOW - 2 * 86400.0,))
+        eng.tuner.read_evidence = Mock(return_value={
+            "status": "ok", "valid": True, "validity_reasons": [], "through_ts": NOW - 7 * 3600.0, "events": [], "viewed_ids": [],
+            "promotion_enabled": False,
+            "promotion_reasons": ["automatic_promotion_disabled", "session_evidence_policy_required", "watch_capture_unavailable"]})
+        eng.tuner.cumulative_facts = Mock(return_value={})
+        eng.tuner.promote = Mock()
+
+        def summary(cand_offset):
+            trials = [{"arm": arm, "reward": (.2 if arm == "base" else .2 + cand_offset) + ((s * 7 + i) % 5) * .01,
+                       "category": "acts" if arm == "base" else ("acts", "other", "bodyparts")[(s + i) % 3],
+                       "liked": False, "viewed_id": f"{arm}-{s}-{i}", "kind": "video", "item_id": s * 10 + i}
+                      for s in range(20) for i in range(4) for arm in ("base", "cand")]
+            sessions = {}
+            for index, trial in enumerate(trials):
+                sessions.setdefault(f"session-{index // 8}", []).append(trial)
+            return {"status": "ok", "valid": True, "validity_reasons": [], "promotion_reasons": [], "trials": trials, "sessions": sessions}
+
+        eng.tuner.summarize_trials = Mock(return_value=summary(.3))
+        card = eng.scorecard()
+        assert card["tuner"]["promotion_eligible"] is True
+        assert card["evidence"]["promotion_reasons"] == ["watch_capture_unavailable"]
+        assert eng.tuner.tick(now=NOW)["action"] == "promote"
+        eng.tuner.summarize_trials = Mock(return_value=summary(0.0))
+        assert eng.scorecard()["tuner"]["promotion_eligible"] is False
+        assert eng.tuner.tick(now=NOW)["action"] != "promote"
+        # the winning trials sit inside the ripen window: the page shows them but is not eligible
+        ripe_boundary = NOW - tuning.TUNER_RIPEN_S
+        evidence = eng.tuner.read_evidence.return_value
+        eng.tuner.read_evidence = Mock(side_effect=lambda _path, *, since_ts, through_ts: {**evidence, "through_ts": through_ts})
+        eng.tuner.summarize_trials = Mock(side_effect=lambda ev, **_: summary(.3 if ev["through_ts"] > ripe_boundary else 0.0))
+        card = eng.scorecard()
+        assert card["tuner"]["promotion_eligible"] is False
+        assert card["evidence"]["through_ts"] > ripe_boundary, "displayed trials still use the current evidence"
+        assert eng.tuner.tick(now=NOW)["action"] != "promote"
 
     def test_scorecard_uses_actual_active_knob_and_missing_evidence_disables_promotion(self, tmp_path, clock):
         eng = make_engine(tmp_path, clock[1])

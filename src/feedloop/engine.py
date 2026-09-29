@@ -34,7 +34,7 @@ DEFAULT_CONFIG = dict(
     half_life_days=21.0, min_watch_seconds=20.0, finished_ratio=0.45, abandon_ratio=0.15,
     dislike_min_watch_seconds=60.0, short_watch_ratio=0.5, history_limit=600, rating_strength=1.0,
     dislike_strength=1.0, profile_tags=24, candidate_pool=600, bodyparts_weight=0.3, max_tag_share=0.35,
-    length_floor_seconds=120.0, diversity=0.35, calibration=0.25, cooldown_days=45.0, recovery_days=120.0,
+    length_floor_seconds=120.0, diversity=0.7, calibration=0.25, cooldown_days=45.0, recovery_days=120.0,
     impression_discount=0.95, image_events_enabled=True, include_images=False, images_share=0.2,
     explore_slots=2, control_rate=1.0,
     # v0.6.0: None derives the value from candidate_pool (per source: max(40, pool // 4); per tag: max(pool, 400))
@@ -179,18 +179,23 @@ class Engine:
 
     def cumulative_facts(self, items, cutoff_ts):
         """Current Catalog/Signals values at the exact evidence cutoff. Signals.read is current
-        data with no as-of view, so rows observed after the cutoff leave its facts unavailable."""
+        data with no as-of view, so an item whose row changed after the cutoff has no facts.
+        Rows carrying ``updated_at`` are judged one by one; otherwise any write observed after
+        the cutoff leaves every item's facts unavailable."""
         keys = sorted(set(items))
         if not keys:
             return {"cutoff_ts": cutoff_ts, "items": {}}
         current = self.signals.read(keys)
-        if float(current["observed_at"]) > cutoff_ts:
-            return {"cutoff_ts": cutoff_ts, "items": {}}
         rows = current["rows"]
+        per_row = all("updated_at" in row for row in rows.values())
+        if not per_row and float(current["observed_at"]) > cutoff_ts:
+            return {"cutoff_ts": cutoff_ts, "items": {}}
         catalog_rows = self.sources.rows(keys)
         facts = {}
         for key in keys:
             row, item = rows.get(key) or {}, catalog_rows.get(key) or {}
+            if per_row and float(row.get("updated_at", cutoff_ts)) > cutoff_ts:
+                continue
             watch = row.get("watch") or {}
             facts[key] = {"watched_s": float(watch.get("watched_s", 0.0)) if key[0] == self.primary else 0.0,
                           "duration_s": float(item.get("duration_s") or 0.0) if key[0] == self.primary else 0.0,
@@ -521,7 +526,8 @@ class Engine:
                                      allowed=allowed, excluded=excluded, duplicate_groups=pin["groups"], seeds=seeds,
                                      explanations=prep["explanations"], admitted=prep["admitted"], fallback=fallback,
                                      fallback_reasons=prep["fallback_reasons"], explore=prep["explore"], control=prep["control"],
-                                     page_size=page_size or 20, offset=0, limit=len(pin["present"]), kinds=self.kinds)
+                                     page_size=page_size or 20, offset=0, limit=len(pin["present"]), kinds=self.kinds,
+                                     similarity=prep.get("similarity"))
         fallback = prep["fallback"]
         page = select([] if callable(fallback) else checked(fallback))
         if callable(fallback) and not page["all_items"]:

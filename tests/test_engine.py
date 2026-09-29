@@ -321,6 +321,50 @@ def _paging_engine(tmp_path, fake, now):
     return eng, signals, spaces
 
 
+
+def test_a_later_signal_on_one_item_leaves_other_items_facts_at_the_cutoff(tmp_path, clock):
+    now, fake = clock
+    catalog = build_catalog()
+    keys = sorted(catalog.rows)
+    spaces = MemorySpaces({"visual": (keys, unit_rows(len(keys), 16, 1)), "semvisual": (keys, unit_rows(len(keys), 16, 2))})
+    signals = MemorySignals({("video", i): {"rating": None, "engagement_count": 0, "updated_at": 40.0 - i,
+                                            "watch": {"watched_s": 500.0, "last_at": 40.0 - i, "visit_days": [0], "intervals": [(0, 500)]}}
+                             for i in (1, 11, 21, 31)}, observed_at=50.0)
+    ledger_path, tuner_path = str(tmp_path / "events.sqlite"), str(tmp_path / "tuner.sqlite")
+    now[0] = 90.0
+    initialize_stores(ledger_path=ledger_path, tuner_path=tuner_path, cutover_ts=80.0, clock=fake)
+    eng = Engine(catalog=catalog, signals=signals, spaces=spaces, ledger_path=ledger_path, tuner_path=tuner_path, clock=fake,
+                 config={"explore_slots": 0, "control_rate": 0.0, "cooldown_days": 0.0},
+                 attribution={"window_s": 5, "policy_revision": "demo-explicit-w5-v1", "min_advance_s": 0})
+    now[0] = 100.0
+    page = eng.feed({**PAGE, "limit": 12})
+    chosen = next(i for i in page["items"] if i["explanation"].get("arm") in ("base", "cand"))
+    arm = chosen["explanation"]["arm"]
+    now[0] = 101.0
+    viewed = eng.view({"client_event_id": "view-1", "session_id": "s1", "request_id": "r1", "served_item_id": chosen["served_item_id"],
+                       "surface": "feed", "position": chosen["source_rank"], "dwell_ms": 1200, "visible_fraction": 0.6,
+                       "visibility_policy": "foreground-60pct-1200ms-v1", "kind": "video", "item_id": chosen["id"], "occurred_at": 101.0})
+    now[0] = 105.0
+    common = {"stream_session_id": "st", "item_id": chosen["id"], "duration": 600.0, "session_id": "s1", "viewed_event_id": viewed["event_id"],
+              "playback_rate": 1, "canonical_session_id": "s1"}
+    rows = [{**common, "id": "w-start", "type": "view_start", "occurred_at": 101.0, "position": 0, "previous_event_id": None},
+            {**common, "id": "w-progress", "type": "view_progress", "occurred_at": 105.0, "position": 4, "previous_event_id": "w-start"}]
+    eng.record([{"type": "watch_capture", "batch": {"capture_id": "cap-1", "source_id": "player", "received_at": 105.0,
+                                                    "source_revision": "rev-1", "status": "committed", "reason": None, "events_json": rows}}])
+    a, b = ("video", chosen["id"]), next(k for k in keys if k[0] == "video" and k[1] != chosen["id"])
+    signals.rows[a] = {"rating": None, "engagement_count": 0, "updated_at": 105.0,
+                       "watch": {"watched_s": 304.0, "last_at": 105.0, "visit_days": [0], "intervals": [(0, 304)]}}
+    # item B is rated long after the evidence cutoff; only B's own facts become unavailable
+    signals.rows[b] = {"rating": 90, "engagement_count": 0, "updated_at": 1000.0}
+    signals.observed_at = 1000.0
+    facts = eng.cumulative_facts({a, b}, 106.0)["items"]
+    assert facts[a]["watched_s"] == 304.0 and b not in facts
+    now[0] = 106.0
+    assert eng.tick(now=106.0)["attributed"] == 1
+    card = eng.scorecard()
+    assert "cumulative_verdict_unavailable" not in card["evidence"]["validity_reasons"]
+    assert card["tuner"]["arms"][arm]["trials"] == 1 and card["tuner"]["arms"][arm]["successes"] == 1
+
 PAGE = {"limit": 5, "images": False, "surface": "feed", "session_id": "s1", "request_id": "r1", "client_request_id": "c1"}
 
 
@@ -369,13 +413,22 @@ def test_continuation_refuses_changed_feature_revisions(tmp_path, clock):
     assert page == {"items": [], "status": "error", "error_code": "stale_ranking_cursor"}
 
 
-def test_qualified_view_query_searches_the_view_index():
+def test_qualified_view_query_searches_the_view_time_range(tmp_path):
     import sqlite3
     conn = sqlite3.connect(":memory:")
     for sql in ledger._SCHEMA:
         conn.execute(sql)
     plan = " ".join(row[-1] for row in conn.execute("EXPLAIN QUERY PLAN " + ledger._QUALIFIED_VIEWS_SQL, (0.0, 1.0, 1.0)))
-    assert "SEARCH rec_events USING INDEX rec_one_view" in plan and "SCAN rec_events" not in plan, plan
+    assert "SEARCH rec_events USING INDEX rec_view_time (occurred_at>? AND occurred_at<?)" in plan, plan
+    assert "SCAN rec_events" not in plan, plan
+    db = str(tmp_path / "old.db")
+    ledger.initialize_event_store(db, cutover_ts=0.0)
+    with sqlite3.connect(db) as old:
+        old.execute("DROP INDEX rec_view_time")
+    with ledger._connection(db, write=True):
+        pass
+    with sqlite3.connect(db) as reopened:
+        assert reopened.execute("SELECT 1 FROM sqlite_master WHERE name='rec_view_time'").fetchone()
 
 
 def test_watch_receipt_retry_with_a_fresh_received_at_is_a_duplicate(tmp_path, clock):

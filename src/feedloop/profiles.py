@@ -34,6 +34,7 @@ AFFINITY_CAP = 0.15
 AFFINITY_UNIT_S = 600.0
 TRIAL_FULL_S = 3600.0
 TRIAL_RATING_FLOOR = AFFINITY_UNIT_S / TRIAL_FULL_S
+COMPLETION_FLOOR = 0.25  # the weight share a like earns before any completion counts
 
 
 class TTLCache:
@@ -88,6 +89,16 @@ def like_bar(duration: float) -> float:
     if duration <= 0:
         return LIKE_ABS_MIN_S
     return min(max(LIKE_ABS_DURATION_SHARE * duration, LIKE_ABS_MIN_S), LIKE_ABS_MAX_S)
+
+
+def watch_quality(fact, w, duration):
+    """A like's completion weight: a full watch counts fully, a short absolute-bar like counts
+    from COMPLETION_FLOOR up; explicit ratings and engagement are not scaled."""
+    # 2026-09-29 (polish C-d): likes were weighted by raw seconds alone, so a 4-minute taste of a
+    # long item taught as much as a full watch of a short one
+    if fact["explicit"] or w is None or duration <= 0:
+        return 1.0
+    return COMPLETION_FLOOR + (1.0 - COMPLETION_FLOOR) * min(w["watched_s"] / duration, 1.0)
 
 
 def watch_counts(w: Mapping[str, float], duration: float, min_watch: float, short_watch_ratio: float) -> bool:
@@ -163,10 +174,11 @@ def build_profiles(watch, durations, features, *, half_life, min_watch, finished
         decay = (0.5 ** (w["days"] / half_life) if fact["watch_eligible"] and half_life > 0 else 1.0)
         repeat = 1.0 + 0.25 * max(0.0, w["visits"] - 1) if fact["watch_eligible"] else 1.0
         if fact["is_like"]:
+            quality = watch_quality(fact, w, durations.get(sid, 0.0))
             n_like += 1
             like_seconds += w["watched_s"] if w is not None else 0.0
             for tag, secs in tags.items():
-                liked[tag] += secs * decay * repeat * fact["boost"]
+                liked[tag] += secs * decay * repeat * fact["boost"] * quality
         elif fact["is_dislike"]:
             n_dislike += 1
             dislike_seconds += w["watched_s"] if w is not None else 0.0
@@ -217,7 +229,7 @@ def rocchio_over(m, index, watch, durations, *, half_life, finished_ratio, aband
         else:
             weight = SECONDARY_EVENT_VEC_WEIGHT
         if fact["is_like"]:
-            liked += weight * fact["boost"] * m[i].astype(np.float32)
+            liked += weight * fact["boost"] * watch_quality(fact, watch.get(sid), durations.get(sid, 0.0)) * m[i].astype(np.float32)
             n_like += 1
         elif fact["is_dislike"]:
             disliked += weight * fact["boost"] * m[i].astype(np.float32)

@@ -92,3 +92,24 @@ def test_cold_start_with_images_requested_serves_images(tmp_path, clock):
     items = served(eng.feed(REQUEST, record_delivery=False))
     kinds = [kind for kind, *_rest in items]
     assert all(sources == ("fallback",) for *_rest, sources in items) and "image" in kinds and "video" in kinds, items
+
+
+def test_unit_view_survives_huge_and_tiny_finite_rows():
+    keys = [("video", 1), ("video", 2)]
+    m = np.array([[3.0, 4.0], [3.0, 4.0]], dtype=np.float32) * np.array([[1e20], [1e-30]], dtype=np.float32)
+    ids, unit, _index = KindMatrices(MemorySpaces({"visual": (keys, m)})).get("visual", "video")
+    assert ids == [1, 2] and unit.dtype == np.float32
+    assert np.allclose(unit, [[0.6, 0.8], [0.6, 0.8]])
+
+
+def test_a_space_named_means_is_the_legacy_look_view(tmp_path, clock):
+    now, fake = clock
+    keys = sorted(build_catalog().rows)
+    m = np.abs(unit_rows(len(keys), 16, 1))
+    ids, view, _index = KindMatrices(MemorySpaces({"means": (keys, m)})).paired("visual", "semvisual", "video")
+    assert ids == [i for kind, i in keys if kind == "video"] and np.allclose(view, m[[keys.index(("video", i)) for i in ids]])
+    items = feed_over(tmp_path / "a", now, fake, {"means": (keys, m)})
+    assert any("visual" in sources for *_rest, sources in items), items
+    both = {"visual": (keys, m), "semvisual": (keys, np.abs(unit_rows(len(keys), 16, 2)))}
+    assert KindMatrices(MemorySpaces({**both, "means": (keys, m)})).paired("visual", "semvisual", "video")[1].shape[1] == 32, \
+        "the paired roles win over the legacy space"

@@ -205,6 +205,9 @@ def test_search_similar_and_whole_item_positions(ctx):
     assert request(ctx, "GET", "/api/search?q=amber&limit=zz", auth=False)[1]["error_code"] == "invalid_search_request"
     status, alike = request(ctx, "GET", "/api/similar?kind=video&id=1", auth=False)
     assert alike["status"] == "ok" and alike["items"] and all(i["kind"] == "video" and i["id"] != 1 for i in alike["items"])
+    seed = ctx.source.fetch([("video", 1)])["items"][0]
+    assert alike["seed"] == {"kind": "video", "id": 1, "title": seed["title"], "media_url": "/media/video/1"}
+    assert "seed" not in request(ctx, "GET", "/api/similar?kind=video&id=999", auth=False)[1]
     assert request(ctx, "GET", "/api/similar?kind=video&id=x", auth=False)[1]["error_code"] == "invalid_similar_request"
     assert request(ctx, "GET", "/api/similar?kind=other&id=1", auth=False)[1]["error_code"] == "invalid_similar_request"
 
@@ -349,6 +352,11 @@ def test_etag_revalidation_and_gzip_for_text_assets(ctx, tmp_path):
     assert status == 200 and zipped_headers["Content-Encoding"] == "gzip" and zipped_headers["Vary"] == "Accept-Encoding"
     assert gzip.decompress(body) == (web / "style.css").read_bytes()
     assert ctx.app.handle("GET", "/style.css", {"if-none-match": zipped_headers["ETag"], "accept-encoding": "gzip"})[0] == 304
+    assert ctx.app.handle("GET", "/style.css", {"if-none-match": zipped_headers["ETag"]})[0] == 200
+    assert ctx.app.handle("GET", "/style.css", {"if-none-match": headers["ETag"], "accept-encoding": "gzip"})[0] == 200
+    status, head_headers, body = ctx.app.handle("HEAD", "/style.css", {"accept-encoding": "gzip"})
+    head_headers = dict(head_headers)
+    assert status == 200 and body == b"" and head_headers["Content-Encoding"] == "gzip" and head_headers["ETag"] == zipped_headers["ETag"]
     assert "Content-Encoding" not in dict(ctx.app.handle("GET", "/style.css", {"accept-encoding": "gzip", "range": "bytes=0-9"})[1])
     for refusal in ("gzip;q=0", "br, gzip; q=0.0", "identity"):
         assert "Content-Encoding" not in dict(ctx.app.handle("GET", "/style.css", {"accept-encoding": refusal})[1]), refusal

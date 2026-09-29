@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from feedloop import ledger, serving, tuning
 from feedloop.engine import Engine, initialize_stores
-from feedloop.slots import item_key
+from feedloop.slots import MissingKeys, item_key
 from feedloop.sources.filesystem import FilesystemSource, TextHashEncoder, build_text_hash_space
 
 MAX_BODY_BYTES = 1 << 20
@@ -394,7 +394,19 @@ class FeedloopApp:
             result = self.engine.similar(key, offset=offset, limit=limit)
         except ValueError:
             return _reply(200, {"status": "error", "error_code": "invalid_similar_request", "items": []})
+        seed = self.seed(key)
+        if seed is not None and isinstance(result, dict):
+            result = {**result, "seed": seed}
         return _reply(200, self.annotate(result))
+
+    def seed(self, key):
+        if self.source is None:
+            return None
+        try:
+            row = self.source.fetch([key])["items"][0]
+        except (MissingKeys, IndexError):
+            return None
+        return {"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url")}
 
     # ---------------------------------------------------------- scorecard
     def scorecard(self) -> Response:
@@ -450,7 +462,7 @@ class FeedloopApp:
         size = stat.st_size
         etag = f'"{size:x}-{stat.st_mtime_ns:x}"'
         compressible = not media and candidate.suffix.lower() in COMPRESSIBLE_SUFFIXES
-        wants_gzip = compressible and method == "GET" and _accepts_gzip(headers.get("accept-encoding", "")) and GZIP_MIN_BYTES < size <= GZIP_MAX_BYTES
+        wants_gzip = compressible and _accepts_gzip(headers.get("accept-encoding", "")) and GZIP_MIN_BYTES < size <= GZIP_MAX_BYTES
         cache = [("Cache-Control", "private, no-cache" if media else "no-cache"), ("Last-Modified", formatdate(stat.st_mtime, usegmt=True))]
         if compressible:
             cache.append(("Vary", "Accept-Encoding"))
@@ -472,11 +484,12 @@ class FeedloopApp:
         gzipped = wants_gzip and status == 200
         served_etag = etag[:-1] + '-gzip"' if gzipped else etag
         offered = {tag.strip().removeprefix("W/") for tag in headers.get("if-none-match", "").split(",")}
-        if "*" in offered or etag in offered or etag[:-1] + '-gzip"' in offered:
+        if "*" in offered or served_etag in offered:
             return 304, [("ETag", served_etag)] + cache, b""
         extra = [("Content-Type", mime), ("Accept-Ranges", "bytes"), ("ETag", served_etag)] + cache
         if gzipped:
-            return status, extra + [("Content-Encoding", "gzip")], gzip.compress(candidate.read_bytes(), mtime=0)
+            body = b"" if method == "HEAD" else gzip.compress(candidate.read_bytes(), mtime=0)
+            return status, extra + [("Content-Encoding", "gzip")], body
         if status == 206:
             extra.append(("Content-Range", f"bytes {start}-{end}/{size}"))
         return status, extra, FileBody(candidate, start, end - start + 1)
@@ -537,7 +550,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         if not any(name.lower() == "cache-control" for name, _ in headers):
             self.send_header("Cache-Control", "no-store")
-        if status != 304:
+        # 2026-09-29: a gzip HEAD never compresses the file, so its encoded length is unknown and omitted.
+        if status != 304 and not (self.command == "HEAD" and any(name == "Content-Encoding" for name, _ in headers)):
             self.send_header("Content-Length", str(data.length if isinstance(data, FileBody) else len(data)))
         self.end_headers()
         if self.command == "HEAD" or status == 304:

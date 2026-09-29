@@ -336,6 +336,24 @@ class Tuner:
         self.rotate("promoted", expected_revision=next_revision)
         return True
 
+    def ripe_report(self, window_started, *, now):
+        """The evidence and trial report tick decides on: read through the ripen boundary,
+        or the completed attribution run inside it. The report is None when tick would wait."""
+        through = now - TUNER_RIPEN_S
+        if through <= window_started:
+            return {"status": "window_unripe"}, None
+        evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through)
+        completed = evidence.get("attribution_run")
+        if completed and window_started < float(completed["through_ts"]) < through:
+            through = float(completed["through_ts"])
+            evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through)
+        if evidence.get("status") != "ok":
+            return evidence, None
+        viewed = set(evidence.get("viewed_ids") or [])
+        items = {(row["kind"], row["item_id"]) for row in evidence.get("events", []) if row["event_id"] in viewed}
+        return evidence, self.summarize_trials(evidence, verdict=self.verdict, trial_reward=self.reward,
+                                               cumulative_at_cutoff=self.cumulative_facts(items, evidence["through_ts"]))
+
     def tick(self, *, now=None):
         """One autonomous evaluation of the active experiment, end to end."""
         now = self.clock() if now is None else now
@@ -347,20 +365,9 @@ class Tuner:
         if not active_knob or not arms:
             return {"action": "disabled"}
         window_started = float(arms[2] or 0.0)
-        through = now - TUNER_RIPEN_S
-        if through <= window_started:
-            return {"action": "wait", "reason": "window_unripe"}
-        evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through)
-        completed = evidence.get("attribution_run")
-        if completed and window_started < float(completed["through_ts"]) < through:
-            through = float(completed["through_ts"])
-            evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through)
-        if evidence.get("status") != "ok":
+        evidence, report = self.ripe_report(window_started, now=now)
+        if report is None:
             return {"action": "wait", "reason": evidence.get("status", "unavailable")}
-        viewed = set(evidence.get("viewed_ids") or [])
-        items = {(row["kind"], row["item_id"]) for row in evidence.get("events", []) if row["event_id"] in viewed}
-        report = self.summarize_trials(evidence, verdict=self.verdict, trial_reward=self.reward,
-                                       cumulative_at_cutoff=self.cumulative_facts(items, evidence["through_ts"]))
         action, detail = decide(report, now=now, window_started=window_started)
         if action == "promote":
             self.promote(detail, expected_revision=revision)

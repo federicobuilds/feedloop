@@ -284,3 +284,29 @@ def test_signal_writes_keep_the_inventory_and_spaces_load_once(tmp_path, monkeyp
     assert len(loads) == 2
     revision = source.write_space("s", [("video", 1), ("video", 2)], np.ones((2, 2)), meta={"provenance": "t", "window_scope": "none"})
     assert source.revision("s") == revision and len(source.matrix("s")[0]) == 2
+
+
+def test_signal_rows_carry_their_own_update_time(tmp_path):
+    source, _, clock = source_for(tmp_path)
+    source.apply_change(("video", 1), {"action": "rating", "rating100": 60})
+    rated = clock.now
+    clock.now += 50.0
+    source.apply_change(("video", 2), {"action": "rating", "rating100": 80})
+    read = source.read([("video", 1), ("video", 2)])
+    assert read["observed_at"] == clock.now
+    assert read["rows"][("video", 1)]["updated_at"] == rated and read["rows"][("video", 2)]["updated_at"] == clock.now
+
+
+def test_matrix_is_the_same_array_until_the_space_or_catalog_changes(tmp_path):
+    source, _, _ = source_for(tmp_path)
+    meta = {"provenance": "t", "window_scope": "none"}
+    source.write_space("s", [("video", 1), ("video", 2)], np.ones((2, 2)), meta=meta)
+    first = source.matrix("s")[1]
+    assert source.matrix("s")[1] is first
+    source.write_space("s", [("video", 1), ("video", 2), ("video", 3)], np.ones((3, 2)), meta=meta)
+    rewritten = source.matrix("s")[1]
+    assert rewritten is not first and source.matrix("s")[1] is rewritten
+    os.remove(source.media_path(("video", 2)))
+    source.refresh()
+    keys, shrunk = source.matrix("s")
+    assert keys == [("video", 1), ("video", 3)] and shrunk is not rewritten
