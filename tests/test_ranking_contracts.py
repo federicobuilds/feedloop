@@ -353,6 +353,7 @@ class RawRankingContracts(OfflineTestCase):
             RANKING.rank({**inputs, 'evidence': [{**event, 'known_at':'2025-12-31T00:00:00Z'}]}, context=context, config=raw_config(), seed=1)
 
     def test_shared_page_scores_selects_and_paginates_one_kind_key_sequence(self):
+        self.enterContext(patch.object(RANKING_MODULE, "SELECTION_TEMPERATURE", 0.0))
         comps = [(('video', i), {}, 'acts', 1.0, None, None, None, 1.0, None) for i in range(1, 5)]
         images = [(('image', 1), 0.9, 1.0, -0.3), (('image', 2), 0.85, 1.0, 0.3)]
         kwargs = dict(config=raw_config(images_share=0.5, contributor_affinity_weight=0.5),

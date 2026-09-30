@@ -355,7 +355,20 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
         learn_categories(sid, vectors[sid])
     present = {sid for sid in pool_ids if (primary, sid) in duration_of}
     view_counts = views.get("counts", {}) if views.get("status") == "ok" else {}
-    fatigue = ({sid: impression_discount ** min(int(n), FATIGUE_CAP) for (kind, sid), n in view_counts.items() if kind == primary}
+    penalties = {sid: int(n) for (kind, sid), n in view_counts.items() if kind == primary}
+    # 2026-09-29 (skip decay): each delivery since the last watch that never got a view drifts the
+    # item down by the same discount; explicitly liked items keep their place
+    if impression_discount < 0.999 and views.get("status") == "ok":
+        for (kind, sid), delivered in views.get("deliveries", {}).items():
+            fact = facts.get(sid) or {}
+            if kind != primary or (fact.get("explicit") and fact.get("is_like")):
+                continue
+            since_watch = (watch.get(sid) or {}).get("days", np.inf) * 86400.0
+            skips = sum(1 for at in delivered if now - at < since_watch)
+            if skips:
+                penalties[sid] = penalties.get(sid, 0) + skips
+    # 2026-09-30: view days and skips share one cap, so the two penalties never stack past it
+    fatigue = ({sid: impression_discount ** min(n, FATIGUE_CAP) for sid, n in penalties.items()}
                if impression_discount < 0.999 else {})
 
     # contributor affinity over trusted links, shrunk and capped in rank_page

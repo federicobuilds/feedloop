@@ -478,8 +478,8 @@ class TestLiveServingContracts:
         retry = eng.feed(LIVE)
         assert [i["served_item_id"] for i in retry["items"]] == [i["served_item_id"] for i in pages[0]["items"]]
         assert fresh["items"][0]["served_item_id"] != pages[0]["items"][0]["served_item_id"]
-        assert fresh["ranking_content_id"] == pages[0]["ranking_content_id"], "a fresh delivery reuses the frozen content"
-        ranks.assert_called_once()
+        assert fresh["ranking_content_id"] != pages[0]["ranking_content_id"], "a fresh open builds a new generation"
+        assert ranks.call_count == 2, "the retry reused the frozen page"
         assert len(ledger.read_evidence(eng.ledger_path, since_ts=0, through_ts=NOW + 10)["requests"]) == 4
 
     def test_pure_observation_and_stale_cursor_do_not_create_delivery(self, tmp_path, clock):

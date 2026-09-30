@@ -475,7 +475,15 @@ class _CosineBatch:
         return sims
 
 
-def select(scored, *, want, diversity, calibration, target_shares, details=None, similarity=None):
+# 2026-09-29 (fresh feed per open): each MMR step samples among its SAMPLE_TOP best values with
+# p ~ exp(value / SELECTION_TEMPERATURE) instead of taking the arg-max; 0 is the deterministic order.
+# Values are relevance normalized to the top item and neighbouring candidates sit 0.005-0.03 apart,
+# so 0.005 lets near-equals trade places while a candidate 0.025 behind is picked about 1 time in 150.
+SELECTION_TEMPERATURE = 0.005
+SAMPLE_TOP = 8
+
+
+def select(scored, *, want, diversity, calibration, target_shares, details=None, similarity=None, temperature=0.0, rng=None):
     """Incremental MMR; strict comparisons preserve input tie order.
 
     2026-09-16: each candidate's norm is reduced once per call, not once per
@@ -487,6 +495,7 @@ def select(scored, *, want, diversity, calibration, target_shares, details=None,
     2026-09-29 (polish C follow-up): tag cosine alone left a page of one embedding cluster when
     the clusters' tags differ; an optional similarity(keys) -> (n, n) cosine matrix makes the
     redundancy term max(tag cosine, embedding cosine). Without it the selection is unchanged.
+    temperature > 0 with a numpy Generator rng samples each step among the SAMPLE_TOP best values.
     """
     chosen = []
     last, last_norm = None, 0.0
@@ -498,28 +507,34 @@ def select(scored, *, want, diversity, calibration, target_shares, details=None,
     max_sims = [0.0] * len(pool)
     scale = abs(scored[0][0] if scored else 1.0) or 1.0
     embedded = similarity([sid for _rel, sid, _vec, _cat in pool]) if similarity is not None and pool else None
+    sampling = temperature > 0 and rng is not None
     while pool and len(chosen) < want:
-        best_idx, best_val, best_trace = 0, -1e18, None
         sims = batch.similarities(np.array(alive, dtype=np.int64), last, norms, last_norm) if chosen else None
         if sims is not None and embedded is not None:
             sims = np.maximum(sims, embedded[alive, last]).tolist()
+        vals, deficits = [], []
         for idx, (rel, sid, vec, cat) in enumerate(pool):
             if chosen:
                 sim = sims[idx]
                 if sim > max_sims[idx]:
                     max_sims[idx] = sim
-            sim = max_sims[idx]
             have = counts[cat] / (len(chosen) or 1)
             deficit = max(0.0, target_shares.get(cat, 0.0) - have)
-            val = rel / scale - diversity * sim + calibration * deficit
-            if val > best_val:
-                best_idx, best_val = idx, val
-                if details is not None:
-                    best_trace = {"relevance_normalized": rel / scale, "scale": scale,
-                                  "maximum_similarity": sim, "diversity_penalty": diversity * sim,
-                                  "category_deficit": deficit, "calibration_bonus": calibration * deficit,
-                                  "value": val, "ranked_position": len(chosen)}
+            vals.append(rel / scale - diversity * max_sims[idx] + calibration * deficit)
+            deficits.append(deficit)
+        best_idx = vals.index(max(vals))
+        if sampling and len(vals) > 1:
+            values = np.array(vals)
+            top = np.argsort(-values, kind="stable")[:SAMPLE_TOP]
+            weights = np.exp((values[top] - values[top[0]]) / temperature)
+            best_idx = int(rng.choice(top, p=weights / weights.sum()))
         rel, sid, vec, cat = pool.pop(best_idx)
+        if details is not None:
+            sim, deficit, val = max_sims[best_idx], deficits[best_idx], vals[best_idx]
+            best_trace = {"relevance_normalized": rel / scale, "scale": scale,
+                          "maximum_similarity": sim, "diversity_penalty": diversity * sim,
+                          "category_deficit": deficit, "calibration_bonus": calibration * deficit,
+                          "value": val, "ranked_position": len(chosen)}
         last = alive.pop(best_idx)
         last_norm = norms[last]
         max_sims.pop(best_idx)
@@ -706,7 +721,7 @@ def rank_page(comps, image_comps, *, config, target_shares, seed, allowed, exclu
         scoring_seconds += time.perf_counter() - started
         primaries = select(scored, want=len(scored), diversity=knobs["diversity"],
                            calibration=knobs["calibration"], target_shares=target_shares, details=trace,
-                           similarity=similarity)
+                           similarity=similarity, temperature=SELECTION_TEMPERATURE, rng=np.random.default_rng(seed))
         return eligible(interleave_kinds(primaries, images, len(primaries) + len(images), config["images_share"])), scores
     chosen, scores = arm(config, details)
     experiment = config.get("experiment")

@@ -82,6 +82,8 @@ _EVENT_FIELDS = (
 # 2026-09-29 (K2): the fatigue window reads views by time; the partial index lets it SEARCH the
 # range instead of filtering every view. Also created on each write open so existing stores gain it.
 _VIEW_TIME_INDEX = "CREATE INDEX IF NOT EXISTS rec_view_time ON rec_events(occurred_at) WHERE event_type='viewed'"
+# 2026-09-29 (skip decay): the same partial time index for deliveries, created the same way.
+_SERVED_TIME_INDEX = "CREATE INDEX IF NOT EXISTS rec_served_time ON rec_events(occurred_at) WHERE event_type='served'"
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS rec_metadata (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -144,6 +146,7 @@ _SCHEMA = (
     "CREATE UNIQUE INDEX IF NOT EXISTS rec_one_correction ON rec_events(corrects_id) WHERE corrects_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS rec_item_time ON rec_events(session_id,kind,item_id,occurred_at)",
     _VIEW_TIME_INDEX,
+    _SERVED_TIME_INDEX,
     """CREATE TABLE IF NOT EXISTS rec_event_receipts (
         source TEXT NOT NULL, source_event_id TEXT NOT NULL,
         event_id TEXT NOT NULL REFERENCES rec_events(event_id), submitted_json TEXT NOT NULL,
@@ -318,6 +321,7 @@ def _connection(db_path, *, write=False, initialize=False):
             _require(row is not None and row["schema_version"] == SCHEMA_VERSION, "schema_unavailable")
             if write:
                 conn.execute(_VIEW_TIME_INDEX)
+                conn.execute(_SERVED_TIME_INDEX)
         yield conn
         conn.commit()
         if write:
@@ -1245,6 +1249,26 @@ def read_qualified_views(db_path: str, *, since_ts: float, through_ts: float) ->
     try:
         with _connection(db_path) as conn:
             rows = conn.execute(_QUALIFIED_VIEWS_SQL, (since_ts, through_ts, through_ts)).fetchall()
+        return {"status": "ok", "events": [dict(r) for r in rows]}
+    except ContractError as exc:
+        return _unavailable(str(exc))
+
+
+_UNVIEWED_DELIVERIES_SQL = """SELECT s.kind,s.item_id,s.occurred_at FROM rec_events s
+    WHERE s.event_type='served' AND s.occurred_at>=? AND s.occurred_at<=? AND s.received_at<=?
+      AND NOT EXISTS (SELECT 1 FROM rec_events v WHERE v.parent_id=s.event_id AND v.event_type='viewed')
+    ORDER BY s.occurred_at,s.rowid"""
+
+
+def read_unviewed_deliveries(db_path: str, *, since_ts: float, through_ts: float) -> dict[str, Any]:
+    """Served events inside [since_ts, through_ts] known by through_ts that never got a view.
+    The range SEARCHes the rec_served_time partial index; the view check probes rec_one_view."""
+    _number(since_ts)
+    _number(through_ts)
+    _require(since_ts <= through_ts, "invalid_window")
+    try:
+        with _connection(db_path) as conn:
+            rows = conn.execute(_UNVIEWED_DELIVERIES_SQL, (since_ts, through_ts, through_ts)).fetchall()
         return {"status": "ok", "events": [dict(r) for r in rows]}
     except ContractError as exc:
         return _unavailable(str(exc))

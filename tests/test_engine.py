@@ -233,21 +233,24 @@ def test_changed_revisions_block_publication_and_first_page_reuse(tmp_path, cloc
     assert first["status"] == "ok", first
     generation = first["items"][0]["provenance"]["ranking_generation_id"]
     assert generation in eng._cursors
-    same = eng.feed({**REQUEST, "request_id": "req-2", "client_request_id": "client-2"})
-    assert same["items"][0]["provenance"]["ranking_generation_id"] == generation
+    retry = eng.feed(REQUEST)
+    assert retry["status"] == "ok" and retry["items"] == first["items"], "a retry of the same request reuses the frozen page"
     ranks.assert_called_once()
+    fresh = eng.feed({**REQUEST, "request_id": "req-2", "client_request_id": "client-2"})
+    assert fresh["items"][0]["provenance"]["ranking_generation_id"] != generation, "a fresh open builds a new generation"
+    assert ranks.call_count == 2
     signals.rows[("video", 1)]["watch"]["watched_s"] = 2.0
     signals.observed_at = 60.0
     changed = eng.feed({**REQUEST, "request_id": "req-3", "client_request_id": "client-3"})
     assert changed["status"] == "ok", changed
     assert changed["items"][0]["provenance"]["ranking_generation_id"] != generation
     assert changed["items"][0]["provenance"]["revisions"]["watch"] != first["items"][0]["provenance"]["revisions"]["watch"]
-    assert ranks.call_count == 2
+    assert ranks.call_count == 3
     # the continuation cursor of the earlier generation still pages that generation, as the source did
     continued = eng.feed({**REQUEST, "request_id": "req-4", "client_request_id": "client-4", "offset": first["pagination"]["next_offset"],
                           "cursor": first["pagination"]["next_cursor"]})
     assert continued["status"] == "ok" and continued["items"][0]["provenance"]["ranking_generation_id"] == generation
-    assert ranks.call_count == 2
+    assert ranks.call_count == 3
 
 
 def test_qualified_view_lowers_the_history_multiplier_by_the_impression_discount(tmp_path, clock):
@@ -272,8 +275,12 @@ def test_qualified_view_lowers_the_history_multiplier_by_the_impression_discount
     after = {(item["kind"], item["id"]): item["explanation"].get("history_multiplier")
              for item in eng._cursors[second["items"][0]["provenance"]["ranking_generation_id"]]["items"]}
     assert after[("video", shown["id"])] == pytest.approx(0.5), "one distinct qualified view day: discount ** 1"
-    # every other unwatched item keeps its multiplier (watched items carry a clock-dependent cooldown, not fatigue)
-    unchanged = {key: value for key, value in after.items() if key != ("video", shown["id"]) and value is not None and key not in signals.rows}
+    # the rest of the first page was delivered without a view: one skip each; every other unwatched item keeps
+    # its multiplier (watched items carry a clock-dependent cooldown, not fatigue)
+    skipped = {(item["kind"], item["id"]) for item in first["items"] if item["kind"] == "video"} - {("video", shown["id"])}
+    others = {key: value for key, value in after.items() if key != ("video", shown["id"]) and value is not None and key not in signals.rows}
+    assert skipped and all(others[key] == pytest.approx(before[key] * 0.5) for key in skipped & set(others))
+    unchanged = {key: value for key, value in others.items() if key not in skipped}
     assert unchanged and all(before[key] == value for key, value in unchanged.items())
 
 

@@ -238,11 +238,18 @@ class Engine:
         qualified = ledger.read_qualified_views(self.ledger_path, since_ts=since, through_ts=now)
         if qualified.get("status") != "ok":
             return {"status": qualified.get("status", "unavailable"), "events": [], "revision": None}
+        unviewed = ledger.read_unviewed_deliveries(self.ledger_path, since_ts=since, through_ts=now)
+        if unviewed.get("status") != "ok":
+            return {"status": unviewed.get("status", "unavailable"), "events": [], "revision": None}
         events = [{"event_id": f"visible:{row['event_id']}", "type": "visible", "kind": row["kind"], "id": row["item_id"],
                    "occurred_at": _iso(row["occurred_at"]), "known_at": _iso(max(row["received_at"], row["occurred_at"])), "value": None}
                   for row in qualified["events"] if row["kind"] in self.kinds]
-        revision = _digest(sorted((f"{kind}:{item_id}", n) for (kind, item_id), n in counts["counts"].items()))
-        return {"status": "ok", "events": events, "revision": revision, "counts": dict(counts["counts"])}
+        deliveries = {}
+        for row in unviewed["events"]:
+            deliveries.setdefault((row["kind"], row["item_id"]), []).append(row["occurred_at"])
+        revision = _digest([sorted((f"{kind}:{item_id}", n) for (kind, item_id), n in counts["counts"].items()),
+                            sorted((f"{kind}:{item_id}", at) for (kind, item_id), at in deliveries.items())])
+        return {"status": "ok", "events": events, "revision": revision, "counts": dict(counts["counts"]), "deliveries": deliveries}
 
     def _committed_revisions(self, signals, views):
         """The generation tokens a build must see unchanged before it may publish."""
@@ -367,11 +374,13 @@ class Engine:
             if cursor is not None:
                 snapshot = self._cursors.get(cursor["generation_id"])
             else:
-                # a repeated first page (a retry, a second tab of the same session) reuses the
-                # frozen generation while it is fresh and its catalog and reset state are unchanged
-                snapshot = next((entry for entry in self._cursors.values() if entry["content"] == content_key
+                # 2026-09-29: every fresh open builds a new generation; only a retry of the same
+                # request (same session and client_request_id) reuses its frozen page, even after its
+                # own delivery moved the view revision, so the ledger's idempotent replay sees the same items
+                request = (context["session_id"], context["client_request_id"])
+                snapshot = next((entry for entry in self._cursors.values() if request[1] is not None
+                                 and entry["request"] == request and entry["content"] == content_key
                                  and entry["reset_generation"] == self.reset_generation and entry["catalog"] == pin
-                                 and entry["revisions"] == committed
                                  and now - entry["created_at"] <= serving.CURSOR_TTL_S), None)
         if cursor is not None or snapshot is not None:
             # 2026-09-29 (E-10): a frozen page needs no vectors; hard eligibility reads catalog and evidence only
@@ -461,6 +470,7 @@ class Engine:
                     del self._cursors[oldest]
                 self._cursors[provenance["ranking_generation_id"]] = {
                     "items": copy.deepcopy(items), "catalog": pin, "context": cursor_context, "content": content_key, "created_at": now,
+                    "request": (context["session_id"], context["client_request_id"]),
                     "revisions": committed, "profile": copy.deepcopy(ranked["profile"] or {}),
                     "reset_generation": self.reset_generation, "generation_id": provenance["ranking_generation_id"]}
         page, total, has_more = ranking.page_items(items, offset=offset, limit=limit)

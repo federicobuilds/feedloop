@@ -6,7 +6,7 @@ import random
 import numpy as np
 import pytest
 
-from feedloop import profiles
+from feedloop import profiles, ranking
 from feedloop.engine import Engine, initialize_stores
 from fl2_helpers import MemoryCatalog, MemorySignals, MemorySpaces, catalog_row
 from test_engine import clock  # noqa: F401  (clock is a fixture)
@@ -44,7 +44,7 @@ def watched(days_ago, seconds=600.0):
             "watch": {"watched_s": seconds, "last_at": NOW - days_ago * DAY, "visit_days": [0], "intervals": [(0, seconds)]}}
 
 
-def page(tmp_path, now, fake, signal_rows, limit=24, **config):
+def engine(tmp_path, now, fake, signal_rows, **config):
     catalog, spaces = library()
     tmp_path.mkdir()
     ledger_path, tuner_path = str(tmp_path / "events.sqlite"), str(tmp_path / "tuner.sqlite")
@@ -55,6 +55,11 @@ def page(tmp_path, now, fake, signal_rows, limit=24, **config):
                  space_roles={"visual": "visual", "semantic": "semvisual", "voice": "audioembed", "sound": "audiomix"},
                  config={"control_rate": 0.0, "cooldown_days": 0.0, **config})
     now[0] = NOW
+    return eng
+
+
+def page(tmp_path, now, fake, signal_rows, limit=24, **config):
+    eng = engine(tmp_path, now, fake, signal_rows, **config)
     state = random.getstate()
     try:
         random.seed(11)
@@ -140,3 +145,114 @@ def test_embedding_mmr_mixes_other_clusters_into_the_top_ten(tmp_path, clock):
     top = [cluster_of(i) for i in ids[:10]]
     print("clusters", [cluster_of(i) for i in ids])
     assert sum(c != 0 for c in top) >= 2 and top.count(0) > len(top) / 2, top
+
+
+def opens(eng, count, *, limit=24, seed=11, name="open"):
+    """count fresh opens of Home, each a new request whose delivery is recorded."""
+    state = random.getstate()
+    try:
+        random.seed(seed)
+        results = [eng.feed({**REQUEST, "limit": limit, "request_id": f"{name}-{n}", "client_request_id": f"{name}-{n}"}) for n in range(count)]
+    finally:
+        random.setstate(state)
+    assert all(result["status"] == "ok" for result in results), results
+    return results
+
+
+def ids_of(result):
+    return [item["id"] for item in result["items"]]
+
+
+def test_two_fresh_opens_differ_but_share_the_top_and_lead_with_the_liked_cluster(tmp_path, clock):
+    now, fake = clock
+    eng = engine(tmp_path / "a", now, fake, likes(range(1, 6)))
+    first, second = opens(eng, 2)
+    top_a, top_b = ids_of(first)[:10], ids_of(second)[:10]
+    print("fresh open 1 top 10", top_a)
+    print("fresh open 2 top 10", top_b)
+    assert ids_of(first) != ids_of(second), "a fresh open is a new page"
+    assert len(set(top_a) & set(top_b)) >= 5, (top_a, top_b)
+    for top in (top_a, top_b):
+        assert cluster_of(top[0]) == 0 and [cluster_of(i) for i in top].count(0) > len(top) / 2, top
+
+
+def test_a_retry_returns_the_identical_page_and_load_more_continues_its_generation(tmp_path, clock):
+    now, fake = clock
+    eng = engine(tmp_path / "a", now, fake, likes(range(1, 6)))
+    (first,) = opens(eng, 1)
+    retry = eng.feed({**REQUEST, "request_id": "open-0", "client_request_id": "open-0"})
+    assert retry["status"] == "ok" and retry["items"] == first["items"]
+    more = eng.feed({**REQUEST, "request_id": "more-1", "client_request_id": "more-1",
+                     "offset": first["pagination"]["next_offset"], "cursor": first["pagination"]["next_cursor"]})
+    generation = first["items"][0]["provenance"]["ranking_generation_id"]
+    assert more["status"] == "ok" and all(item["provenance"]["ranking_generation_id"] == generation for item in more["items"])
+    frozen = [item["id"] for item in eng._cursors[generation]["items"]]
+    assert ids_of(first) + ids_of(more) == frozen[:len(first["items"]) + len(more["items"])]
+
+
+def multiplier(result, item_id):
+    return next(item["explanation"]["impression_multiplier"] for item in result["items"] if item["id"] == item_id)
+
+
+def test_an_item_delivered_three_times_without_a_view_drifts_down(tmp_path, clock):
+    now, fake = clock
+    eng = engine(tmp_path / "a", now, fake, likes(range(1, 6)))
+
+    def unrecorded(name):
+        state = random.getstate()
+        try:
+            random.seed(12)  # the same generation seed before and after, so only the deliveries differ
+            return eng.feed({**REQUEST, "request_id": name, "client_request_id": name}, record_delivery=False)
+        finally:
+            random.setstate(state)
+    before = unrecorded("before")
+    lead = ids_of(before)[0]
+    for n in range(3):
+        only = eng.feed({**REQUEST, "request_id": f"only-{n}", "client_request_id": f"only-{n}", "eligibility": {"video_ids": [lead]}})
+        assert ids_of(only) == [lead], only
+    after = unrecorded("after")
+    assert multiplier(before, lead) == 1.0 and multiplier(after, lead) == round(0.95 ** 3, 3)
+    assert ids_of(after).index(lead) > 0, ids_of(after)
+
+
+def test_view_day_fatigue_and_skips_share_one_cap(tmp_path, clock, monkeypatch):
+    from feedloop import engine as engine_module
+    from feedloop.pipeline import FATIGUE_CAP
+    now, fake = clock
+    eng = engine(tmp_path / "a", now, fake, likes(range(1, 6)))
+    lead = ids_of(eng.feed({**REQUEST, "request_id": "first", "client_request_id": "first"}, record_delivery=False))[0]
+    real = engine_module.ledger.read_view_counts
+
+    def with_view_days(*args, **kwargs):
+        counts = real(*args, **kwargs)
+        return {**counts, "counts": {**counts.get("counts", {}), ("video", lead): FATIGUE_CAP}}
+    monkeypatch.setattr(engine_module.ledger, "read_view_counts", with_view_days)
+    for n in range(3):
+        only = eng.feed({**REQUEST, "request_id": f"only-{n}", "client_request_id": f"only-{n}", "eligibility": {"video_ids": [lead]}})
+        assert ids_of(only) == [lead], only
+    after = eng.feed({**REQUEST, "limit": 60, "request_id": "after", "client_request_id": "after"}, record_delivery=False)
+    assert multiplier(after, lead) == round(0.95 ** FATIGUE_CAP, 3)
+
+
+def test_an_explicitly_liked_item_is_not_decayed(tmp_path, clock):
+    now, fake = clock
+    rated = {("video", 6): {"rating": 100, "engagement_count": 0, "watch": None}}
+    eng = engine(tmp_path / "a", now, fake, {**likes(range(1, 6)), **rated})
+    delivered = opens(eng, 3, limit=60)
+    assert all(6 in ids_of(result) for result in delivered)
+    (after,) = opens(eng, 1, limit=60, seed=12, name="later")
+    assert multiplier(after, 6) == 1.0
+    skipped = next(i for i in ids_of(delivered[0]) if i != 6 and all(i in ids_of(result) for result in delivered[1:]))
+    assert multiplier(after, skipped) == round(0.95 ** 3, 3)
+
+
+def test_temperature_zero_gives_the_deterministic_order(tmp_path, clock, monkeypatch):
+    now, fake = clock
+    monkeypatch.setattr(ranking, "SELECTION_TEMPERATURE", 0.0)
+    pages = [page(tmp_path / name, now, fake, likes(range(1, 6)), explore_slots=0) for name in ("a", "b")]
+    assert pages[0] == pages[1], "the generation seed no longer moves the order"
+    rng = np.random.default_rng(0)
+    scored = [(1.0 - i / 100, i, {i % 5: 1.0}, "acts") for i in range(30)]
+    kwargs = dict(want=30, diversity=0.7, calibration=0.0, target_shares={})
+    assert ranking.select(scored, **kwargs, temperature=0.0, rng=rng) == ranking.select(scored, **kwargs)
+    assert ranking.select(scored, **kwargs, temperature=0.01, rng=rng) != ranking.select(scored, **kwargs)
