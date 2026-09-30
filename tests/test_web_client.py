@@ -66,7 +66,7 @@ def test_feed_jump_to_moment_uses_the_served_moment_and_the_player_start():
     root = web_root()
     feed, cards, icons = ((root / name).read_text() for name in ("feed.js", "cards.js", "icons.js"))
     assert "moment:" in icons and 'icon("moment")' in feed
-    jump = feed[feed.index('"data-ai-jump"') - 400:feed.index("extras.push(jump)")]
+    jump = feed[feed.index('if (video && typeof item.best_t === "number")'):feed.index("extras.push(jump)")]
     # only a video with a served moment gets the button, named for the jump it makes
     assert 'typeof item.best_t === "number"' in jump and 'jump.type = "button"' in jump
     assert '"aria-label", "Jump to the matching moment at "' in jump

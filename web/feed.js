@@ -131,8 +131,13 @@ export function mountFeed(host) {
       if (video && typeof item.best_t === "number") {
         const jump = document.createElement("button");
         jump.type = "button"; jump.className = "action"; jump.setAttribute("data-ai-jump", "1");
-        jump.setAttribute("aria-label", "Jump to the matching moment at " + formatTime(item.best_t)); jump.title = jump.getAttribute("aria-label");
-        jump.append(icon("moment"), formatTime(item.best_t));
+        // 2026-09-30: named for the player's start, which openVideo clamps to 0 once metadata shows the moment is past the end
+        const name = () => {
+          jump.setAttribute("aria-label", "Jump to the matching moment at " + formatTime(video.__start)); jump.title = jump.getAttribute("aria-label");
+          jump.replaceChildren(icon("moment"), formatTime(video.__start));
+        };
+        name();
+        video.addEventListener("loadedmetadata", name);
         jump.onclick = () => {
           if (!video.getAttribute("src")) video.__loadSource();
           video.currentTime = video.__start;

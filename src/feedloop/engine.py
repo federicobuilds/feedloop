@@ -84,6 +84,8 @@ def random_control(candidates, exclude, *, eligible_ids=None, seed=0):
 def choose_moment(times, *, seed, sid):
     """One of an item's qualifying window times, best first: the page seed and the item id
     seed the draw, so a fixed seed reproduces the moment whatever else the page holds."""
+    if not times:
+        return None
     if len(times) == 1:
         return times[0]
     return times[int(np.random.default_rng([seed, sid]).integers(len(times)))]
