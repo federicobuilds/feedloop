@@ -3,7 +3,7 @@
    duplicates are dropped by qualified identity, and only genuinely new content re-arms
    the automatic restart. Manual Retry discards the dead cursor and re-arms one restart. */
 import { deliverFeed, isStaleCursor, itemKey } from "./api.js";
-import { building, partial, setState } from "./state.js";
+import { building, formatTime, partial, setState } from "./state.js";
 import { evidenceStrip, explanation } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
 import { media, metaLine, similarLink, stopVideos, whyText } from "./cards.js";
@@ -127,6 +127,19 @@ export function mountFeed(host) {
       const next = document.createElement("button"); next.type = "button"; next.className = "action primary";
       next.append(icon("next"), "Next"); next.onclick = () => move(index + 1);
       const extras = [next];
+      // 2026-09-30: the served moment again, through the player's own start (the #t= source fragment when not loaded yet)
+      if (video && typeof item.best_t === "number") {
+        const jump = document.createElement("button");
+        jump.type = "button"; jump.className = "action"; jump.setAttribute("data-ai-jump", "1");
+        jump.setAttribute("aria-label", "Jump to the matching moment at " + formatTime(item.best_t)); jump.title = jump.getAttribute("aria-label");
+        jump.append(icon("moment"), formatTime(item.best_t));
+        jump.onclick = () => {
+          if (!video.getAttribute("src")) video.__loadSource();
+          video.currentTime = video.__start;
+          start(video);
+        };
+        extras.push(jump);
+      }
       if (item.kind === "video") extras.push(similarLink(item, false));
       const hint = document.createElement("p"); hint.className = "feed-hint";
       hint.innerHTML = "<kbd>J</kbd> <kbd>K</kbd> or arrows to move, <kbd>Space</kbd> to pause, <kbd>M</kbd> for sound, <kbd>L</kbd> <kbd>D</kbd> to rate";

@@ -138,7 +138,7 @@ class KindMatrices:
 
 def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, links, views, now, matrices,
             windows_read, windows_revision, windows_cache, primary, secondary=None):
-    from feedloop.engine import best_windows, fallback_ids, random_control  # engine imports this module
+    from feedloop.engine import best_windows, choose_moment, fallback_ids, random_control  # engine imports this module
     c = config
     intent, eligible = context["intent"], context["eligible_ids"]
     seed_ids = list(intent[f"seed_{primary}_ids"])
@@ -515,7 +515,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
     def windows(keys):
         ids = [key[1] for key in keys if key[0] == primary]
         times = best_windows(profile_vec, ids, read=windows_read, revision=windows_revision, cache=windows_cache) if profile_vec is not None else {}
-        return {(primary, sid): t for sid, t in times.items()}
+        return {(primary, sid): choose_moment(moments, seed=seed, sid=sid) for sid, moments in times.items()}
 
     return {"comps": comps, "image_comps": secondary_comps, "target_shares": target_shares, "explanations": details,
             "admitted": None, "excluded": excluded, "seeds": [(primary, sid) for sid in seed_ids],
