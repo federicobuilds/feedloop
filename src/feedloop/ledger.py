@@ -1217,6 +1217,9 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
             reasons.append("sync_capture_gap")
         for eid in watch_quarantined_views & selected_views:
             view_blockers.setdefault(eid, []).append("watch_capture_quarantined")
+        unlinked_quarantines = len(watch_quarantined_views - selected_views - {None})
+        if unlinked_quarantines:
+            excluded["watch_capture_quarantined"] = unlinked_quarantines
         sessions = {}
         viewed_ids = [r["event_id"] for r in events if r["event_id"] in selected_views]
         for eid in viewed_ids:
@@ -1421,8 +1424,6 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
             unresolved = events[pending["outcome_id"]]
             original = events.get(unresolved["corrects_id"], unresolved)
             if pending["reason"] in ("outside_attribution_window", "pre_exposure_watch"):
-                continue
-            if original["parent_id"] not in (None, event["event_id"], served["event_id"]):
                 continue
             if (_same_session(original, event) and all(original[k] == event[k] for k in ("kind", "item_id"))
                     and event["occurred_at"] <= original["occurred_at"] <= event["occurred_at"] + run["window_s"]):

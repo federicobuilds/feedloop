@@ -443,6 +443,30 @@ class EventContracts(unittest.TestCase):
         self.assertEqual(summary["excluded"], {"session_mapping_missing": 1})
         self.assertGreaterEqual(summary["excluded_diagnostics"].get("session_mapping_missing", 0), 1)
 
+    def test_pending_outcome_under_another_request_excludes_the_trial_it_reaches(self):
+        self.record_view()
+        other = self.serve("page-2")[("video", 1)]
+        self.events.record_event(self.db, event=outcome(parent=other))
+        self.attribute()
+        summary = self.summary(watched=300)
+        self.assertEqual(summary["trials"], [])
+        self.assertIsNone(summary["excluded_trials"][0]["reward"])
+        self.assertEqual(summary["excluded"], {"explicit_view_missing": 1})
+        self.assertFalse(summary["valid"])
+
+    def test_unlinked_quarantine_is_a_diagnostic(self):
+        self.two_trials()
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("INSERT INTO rec_watch_capture_imports VALUES ('src','cap',100,100,'h','quarantined','test')")
+            conn.execute("INSERT INTO rec_watch_steps(source_id,event_id,capture_id,payload_json,status,stream_session_id,item_id,occurred_at) "
+                         "VALUES ('src','w1','cap',?,'quarantined','stream',9,120)", (json.dumps({"viewed_event_id": "elsewhere"}),))
+        evidence = self.evidence()
+        self.assertEqual(evidence["view_blockers"], {})
+        self.assertEqual(evidence["excluded_diagnostics"], {"watch_capture_quarantined": 1})
+        summary = self.two_summary({("video", 1): self.FACTS, ("video", 2): self.FACTS})
+        self.assertTrue(summary["valid"], summary["validity_reasons"])
+        self.assertEqual(summary["excluded_diagnostics"], {"watch_capture_quarantined": 1})
+
     def test_missing_cumulative_facts_exclude_only_that_trial(self):
         self.two_trials()
         summary = self.two_summary({("video", 1): self.FACTS})
