@@ -37,6 +37,8 @@ DEFAULT_CONFIG = dict(
     length_floor_seconds=120.0, diversity=0.7, calibration=0.25, cooldown_days=45.0, recovery_days=120.0,
     impression_discount=0.95, image_events_enabled=True, include_images=False, images_share=0.2,
     explore_slots=2, control_rate=1.0,
+    # v0.8.4: a qualified view in the last recent_view_hours keeps the item out of fresh pages; 0 disables
+    recent_view_hours=24.0,
     # v0.6.0: None derives the value from candidate_pool (per source: max(40, pool // 4); per tag: max(pool, 400))
     source_budget=None, tag_candidate_limit=None,
 )
@@ -468,7 +470,8 @@ class Engine:
             items.append({"kind": key[0], "id": key[1], "score": row["score"], "explanation": explanation, "best_t": row.get("best_t"),
                           "title": source.get("title"), "media_url": source.get("media_url"),
                           **catalog_module.host_links(source), **catalog_module.media_flags(source),
-                          "duration_s": float(source.get("duration_s") or 0.0), "category": category, "source_rank": position})
+                          "duration_s": float(source.get("duration_s") or 0.0), "category": category, "source_rank": position,
+                          "rating100": catalog_module.rating100(signals["rows"].get(key))})
         # completed-generation equality: every token read before the build must read the same after it
         completed = self._committed_revisions(self.signals.read(), self._views(now))
         stable = (catalog_module.fingerprint_snapshot(self.catalog, pin["keys"], kinds=self.kinds, memo=self._pin_memo) == pin

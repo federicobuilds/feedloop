@@ -206,7 +206,7 @@ def test_search_similar_and_whole_item_positions(ctx):
     status, alike = request(ctx, "GET", "/api/similar?kind=video&id=1", auth=False)
     assert alike["status"] == "ok" and alike["items"] and all(i["kind"] == "video" and i["id"] != 1 for i in alike["items"])
     seed = ctx.source.fetch([("video", 1)])["items"][0]
-    assert alike["seed"] == {"kind": "video", "id": 1, "title": seed["title"], "media_url": "/media/video/1"}
+    assert alike["seed"] == {"kind": "video", "id": 1, "title": seed["title"], "media_url": "/media/video/1", "rating100": None}
     assert "seed" not in request(ctx, "GET", "/api/similar?kind=video&id=999", auth=False)[1]
     assert request(ctx, "GET", "/api/similar?kind=video&id=x", auth=False)[1]["error_code"] == "invalid_similar_request"
     assert request(ctx, "GET", "/api/similar?kind=other&id=1", auth=False)[1]["error_code"] == "invalid_similar_request"
@@ -421,7 +421,7 @@ def test_host_preview_and_open_urls_pass_through_and_bad_schemes_drop(ctx, monke
     ctx.clock.advance(30)
     status, feed = request(ctx, "POST", "/api/feed", feed_request(limit=40))
     status, alike = request(ctx, "GET", "/api/similar?kind=video&id=1", auth=False)
-    assert alike["seed"] == {"kind": "video", "id": 1, "title": alike["seed"]["title"], "media_url": "/media/video/1", **links[1]}
+    assert alike["seed"] == {"kind": "video", "id": 1, "title": alike["seed"]["title"], "media_url": "/media/video/1", **links[1], "rating100": None}
     served = [i for i in feed["items"] + alike["items"] if i["kind"] == "video" and i["id"] in expected]
     assert {i["id"] for i in feed["items"] if i["kind"] == "video"} >= {1, 2, 3} and served
     for item in served:

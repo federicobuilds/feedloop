@@ -242,6 +242,22 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
     hard_exclude.update(sid for sid, fact in facts.items() if fact["is_dislike"] and fact["explicit"])
     hard_exclude.update(seed_ids)
     allowed_set = None if allowed is None else set(allowed)
+    # 2026-10-01 (v0.8.4): a just-seen item kept returning, since a qualified view only adds
+    # fatigue; one viewed within recent_view_hours, liked or not, stays out of fresh pages. When
+    # that would leave fewer open items than the page, the least recently viewed ones stay in.
+    recent_s = float(c.get("recent_view_hours") or 0.0) * 3600.0
+    if recent_s > 0 and views.get("status") == "ok":
+        open_ids = {key[1] for key in catalog["present"] if key[0] == primary and key[1] not in hard_exclude
+                    and (allowed_set is None or key[1] in allowed_set)}
+        last_view = {}
+        for event in views.get("events", ()):
+            if event["type"] == "visible" and event["kind"] == primary and event["id"] in open_ids:
+                at = ranking._timestamp(event["occurred_at"])
+                if now - at < recent_s:
+                    last_view[event["id"]] = max(at, last_view.get(event["id"], at))
+        shortfall = int(context.get("page_size") or 20) - len(open_ids - set(last_view))
+        recent = sorted(last_view, key=lambda sid: (last_view[sid], str(sid)))
+        hard_exclude.update(recent[max(shortfall, 0):])
     positive_tags = [t for t, w in weights.items() if w > 0]
     negative_tags = [t for t, w in weights.items() if w < 0]
     vectors = {}

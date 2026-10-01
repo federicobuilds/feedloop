@@ -27,7 +27,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from feedloop import ledger, serving, tuning
-from feedloop.catalog import host_links, media_flags
+from feedloop.catalog import host_links, media_flags, rating100
 from feedloop.engine import Engine, initialize_stores
 from feedloop.slots import MissingKeys, item_key
 from feedloop.sources.filesystem import FilesystemSource, TextHashEncoder, build_text_hash_space
@@ -405,10 +405,11 @@ class FeedloopApp:
             return None
         try:
             row = self.source.fetch([key])["items"][0]
+            signal_row = self.source.read([key])["rows"].get(key)
         except (MissingKeys, IndexError):
             return None
         return {"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url"),
-                **host_links(row), **media_flags(row)}
+                **host_links(row), **media_flags(row), "rating100": rating100(signal_row)}
 
     # ---------------------------------------------------------- scorecard
     def scorecard(self) -> Response:

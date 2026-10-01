@@ -375,3 +375,15 @@ def test_search_modes_and_missing_features():
     assert [i["id"] for i in excluded["items"]] == [2]
     assert all(call[0] in ("fetch", "enumerate") for call in sources.catalog.calls)
     assert sources.signals.rows == {}
+
+
+def test_search_and_similar_items_carry_the_signals_rating():
+    # v0.8.4: ratings live in Signals; served items carry them so liked items render as liked
+    query = np.array([1.0, 0.0], dtype=np.float32)
+    encoder = Encoder({DEFAULT_SPACE_ROLES["semantic"]: query, DEFAULT_SPACE_ROLES["sound"]: query})
+    signals = MemorySignals({("video", 2): {"rating": 80, "engagement_count": 0}, ("video", 3): {"rating": 101, "engagement_count": 0}})
+    found = {i["id"]: i["rating100"] for i in discovery.search(search_sources(search_spaces(), encoder, signals=signals), "sunset", "look",
+                                                               config={"personalization": 0})["items"]}
+    assert found[2] == 80 and found[1] is None and found.get(3) is None
+    alike, _ = run_similar({1: {10: 100.0}, 2: {10: 90.0}, 3: {10: 50.0}}, signals=signals)
+    assert {i["id"]: i["rating100"] for i in alike["items"]} == {2: 80, 3: None}

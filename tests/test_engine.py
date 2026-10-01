@@ -256,7 +256,8 @@ def test_changed_revisions_block_publication_and_first_page_reuse(tmp_path, cloc
 def test_qualified_view_lowers_the_history_multiplier_by_the_impression_discount(tmp_path, clock):
     now, fake = clock
     now[0] = 90.0
-    eng, signals, _spaces = make_engine(tmp_path, fake, config={"impression_discount": 0.5})
+    # the fatigue under test, not the v0.8.4 recent-view exclusion that would drop the item
+    eng, signals, _spaces = make_engine(tmp_path, fake, config={"impression_discount": 0.5, "recent_view_hours": 0})
     now[0] = 100.0
     first = eng.feed(REQUEST)
     assert first["status"] == "ok", first
@@ -516,3 +517,56 @@ def test_check_signals_reports_contract_breaks():
     assert check_signals(signals, [("video", 1)]) == []
     assert check_signals(signals) == ["video:2: missing updated_at", "video:3: updated_at is after observed_at",
                                       "video:3: rating is not finite"]
+
+
+def test_feed_items_carry_the_signals_rating(tmp_path, clock):
+    now, fake = clock
+    now[0] = 90.0
+    eng, signals, _spaces = make_engine(tmp_path, fake)
+    signals.rows[("video", 11)]["rating"] = 90
+    now[0] = 100.0
+    items = eng._cursors[eng.feed({**REQUEST, "limit": 60}, record_delivery=False)["items"][0]["provenance"]["ranking_generation_id"]]["items"]
+    ratings = {(i["kind"], i["id"]): i["rating100"] for i in items}
+    assert ratings[("video", 11)] == 90 and ratings[("video", 2)] is None
+
+
+def _view_then_feed(tmp_path, clock, hours_later, *, config=None, limit=24, videos=None):
+    now, fake = clock
+    now[0] = 90.0
+    eng, _signals, _spaces = make_engine(tmp_path, fake, config=config)
+    for key in [k for k in eng.catalog.rows if videos is not None and k[1] > videos]:
+        del eng.catalog.rows[key]
+        eng.catalog.feature_rows.pop(key, None)
+    now[0] = 100.0
+    first = eng.feed({**REQUEST, "images": False})
+    shown = first["items"][0]
+    viewed = eng.view({"client_event_id": "view-1", "session_id": "session-1", "request_id": "req-1", "served_item_id": shown["served_item_id"],
+                       "kind": "video", "item_id": shown["id"], "surface": "feed", "position": 0, "dwell_ms": 1500, "visible_fraction": .8,
+                       "visibility_policy": "foreground-60pct-1200ms-v1", "occurred_at": 100.0})
+    assert viewed["status"] == "confirmed", viewed
+    now[0] = 100.0 + hours_later * 3600.0
+    page = eng.feed({**REQUEST, "images": False, "limit": limit, "request_id": "req-2", "client_request_id": "client-2", "session_id": "session-2"})
+    assert page["status"] == "ok", page
+    ranked = eng._cursors[page["items"][0]["provenance"]["ranking_generation_id"]]["items"]
+    return shown["id"], page, {item["id"] for item in ranked}
+
+
+def test_recently_viewed_item_stays_out_of_fresh_pages(tmp_path, clock):
+    seen, _page, ranked = _view_then_feed(tmp_path, clock, 1)
+    assert seen not in ranked, "viewed 1 h ago: hard excluded"
+
+
+def test_item_viewed_30_hours_ago_is_eligible_again(tmp_path, clock):
+    seen, _page, ranked = _view_then_feed(tmp_path, clock, 30)
+    assert seen in ranked
+
+
+def test_recent_view_hours_zero_disables_the_exclusion(tmp_path, clock):
+    seen, _page, ranked = _view_then_feed(tmp_path, clock, 1, config={"recent_view_hours": 0})
+    assert seen in ranked
+
+
+def test_small_library_keeps_recently_viewed_items_to_fill_the_page(tmp_path, clock):
+    # 30 videos and a 30-item page: excluding the viewed one would shrink the page, so it stays
+    seen, page, ranked = _view_then_feed(tmp_path, clock, 1, limit=30, videos=30)
+    assert seen in ranked and len(page["items"]) == 30

@@ -49,6 +49,13 @@ def media_flags(row):
     return {"animated_image": True} if row.get("animated_image") is True else {}
 
 
+def rating100(signal_row):
+    """The served ``rating100`` of an item: its Signals ``rating``, the authoritative rating per
+    the slot contract, kept only when an int in 0..100; anything else serves as None."""
+    value = (signal_row or {}).get("rating")
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100 else None
+
+
 class CatalogMissing(Exception):
     """Some explicitly requested keys are absent, nothing else. args[0] is the frozenset of ItemKey."""
 

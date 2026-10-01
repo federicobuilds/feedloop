@@ -335,6 +335,7 @@ def search(sources: Sources, query, mode="look", *, config=None, context=None, o
         scored = rerank_query_bands(scored, taste_sims, personalization)
     try:
         rows = sources.rows([row[4] for row in scored])
+        signal_rows = sources.signals.read([row[4] for row in scored])["rows"]
     except Exception:
         return {"items": [], "total": 0, "has_more": False, "status": "unavailable",
                 "error_code": "catalog_unavailable", "components": components}
@@ -346,6 +347,7 @@ def search(sources: Sources, query, mode="look", *, config=None, context=None, o
         out.append({"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url"),
                     **catalog_module.host_links(row), **catalog_module.media_flags(row),
                     "duration_s": row.get("duration_s"), "score": round(float(score), 6),
+                    "rating100": catalog_module.rating100(signal_rows.get(key)),
                     "search": {"space": space, "query_score": round(float(score), 6), "best_window_similarity": round(mx, 4),
                                "item_mean_similarity": round(mean_s, 4), "best_t": round(float(best_t), 1),
                                "taste_similarity": round(taste_sims[key], 4) if key in taste_sims else None}})
@@ -581,6 +583,7 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
     chosen = eligible_ranked_items(chosen, {primary: allowed_set}, excluded | (set(chosen) - pin["present"]),
                                    pin["groups"], already_selected=seeds)
     provenance["revisions"]["catalog_fingerprints"] = pin["revision"]
+    signal_rows = sources.signals.read(chosen)["rows"] if chosen else {}
     out = []
     for source_rank, key in enumerate(chosen):
         row = pool_rows.get(key)
@@ -590,6 +593,7 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
         out.append({"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url"),
                     **catalog_module.host_links(row), **catalog_module.media_flags(row),
                     "duration_s": row.get("duration_s"), "score": round(score_by_key.get(key, 0.0), 6),
+                    "rating100": catalog_module.rating100(signal_rows.get(key)),
                     "similar": {"source_rank": source_rank, **details.get(key, {}), "seed_ids": [k[1] for k in seeds],
                                 "contributors": [{**r, "category": cats.get(r["tag_id"], "other"),
                                                   "duration_s": round(coverage.get(key, {}).get(r["tag_id"], 0.0), 1)} for r in top]}})

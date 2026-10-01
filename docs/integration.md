@@ -317,6 +317,8 @@ Each item row has:
 | `updated` | opaque token | May move on any metadata touch. Not part of ranking identity. |
 | `files` | `list` | `[]` for a fileless item; else `{"fingerprints": [{"type": str, "value": str}, ...]}` per file. |
 
+Served Feed, Search and Similar items and the Similar seed carry `rating100` from the Signals row's `rating` (the authoritative rating; an int 0..100, else `None`), never from the catalog row.
+
 `preview_url` and `open_url` must be `http://` or `https://` URLs or
 root-relative paths (`/...`); any other value, or a non-string, is dropped
 before the item reaches the client. The engine copies them onto Feed,
