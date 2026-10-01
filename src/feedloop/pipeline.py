@@ -29,7 +29,6 @@ EXPLORE_MIN_S = 30.0  # seconds outside the profile an explore pick needs
 COOLDOWN_HARD_SHARE = 6.0  # items watched within cooldown_days / this are never candidates
 NEAREST_LIKE_MIN = 0.8  # look cosine a pick needs to its closest liked item to name it
 NEAREST_LIKE_CAP = 200  # most recently watched likes a pick is compared against
-BODYPARTS = "bodyparts"
 LEGACY_LOOK = "means"  # the single look space hosts named before space_roles
 
 
@@ -150,7 +149,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
     finished_ratio, abandon_ratio = c["finished_ratio"], c["abandon_ratio"]
     dislike_min_watch, short_watch_ratio = c["dislike_min_watch_seconds"], c["short_watch_ratio"]
     dislike_strength, rating_strength = c["dislike_strength"], c["rating_strength"]
-    bodyparts_weight, max_tag_share, length_floor = c["bodyparts_weight"], c["max_tag_share"], c["length_floor_seconds"]
+    category_weights, max_tag_share, length_floor = c["category_weights"], c["max_tag_share"], c["length_floor_seconds"]
     cooldown_days, recovery_days = c["cooldown_days"], c["recovery_days"]
     impression_discount, image_events_enabled = c["impression_discount"], bool(c["image_events_enabled"])
     include_secondary = bool(c["include_images"]) and secondary is not None and secondary in kinds
@@ -341,7 +340,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
         for t, s in vec.items():
             w = weights.get(t, 0.0)
             if w:
-                total += w * min(s, POOL_RANK_CAP_S) * (bodyparts_weight if tag_category.get(t) == BODYPARTS else 1.0)
+                total += w * min(s, POOL_RANK_CAP_S) * category_weights.get(tag_category.get(t), 1.0)
         return total
     rough = sorted(vectors.items(), key=lambda kv: (-pool_key(kv[1]), kv[0]))[:pool_size]
     source_orders = {"tags": [sid for sid, _ in rough], **source_orders}
@@ -393,7 +392,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
             continue
         contributions[sid] = []
         duration = duration_of[(primary, sid)]
-        rel = ranking.relevance(vectors[sid], weights, tag_category, duration, bodyparts_weight=bodyparts_weight,
+        rel = ranking.relevance(vectors[sid], weights, tag_category, duration, category_weights=category_weights,
                                 max_tag_share=max_tag_share, length_floor=length_floor, contributions=contributions[sid])
         prelim.append((sid, vectors[sid], duration, rel))
     max_rel = max((p[3] for p in prelim), default=0.0) or 1.0
@@ -413,7 +412,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
         pen = fatigue.get(sid, 1.0)
         aff_vals = [aff_map[i]["affinity"] for i in (item_links.get((primary, sid)) or []) if i in aff_map]
         aff_dev = (sum(aff_vals) / len(aff_vals) - aff_prior) if aff_vals else None
-        cat = ranking.dominant_category(vec, tag_category, weights, bodyparts_weight)
+        cat = ranking.dominant_category(vec, tag_category, weights, category_weights)
         comps.append(((primary, sid), vec, cat, max(rel, 0.0) / max_rel,
                       emb_sims.get(sid), audio_sims.get(sid), mix_sims.get(sid), cooldown * pen, aff_dev))
         details[(primary, sid)] = {
@@ -440,7 +439,7 @@ def prepare(*, context, config, seed, kinds, catalog, signals, rows, features, l
             if cos[row, best[row]] > NEAREST_LIKE_MIN:
                 details[key]["nearest_like"] = {"kind": primary, "id": likes[best[row]], "cosine": round(float(cos[row, best[row]]), 4)}
     want = max(pool_size, len(comps))
-    target_shares = ranking.category_shares(weights, tag_category, bodyparts_weight)
+    target_shares = ranking.category_shares(weights, tag_category, category_weights)
 
     # 6. secondary lane: request exclusions, disliked items never return, fatigue by view days;
     # items absent from the pinned catalog are dropped after the cut

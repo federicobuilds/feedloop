@@ -307,6 +307,38 @@ Each item row has:
 with positive-integer tag ids. `tag_names()` maps known tag ids to display
 names; unknown ids stay unnamed. A key absent from `features` has no features.
 
+Categories are host-defined strings. The `category_weights` config maps a
+category name to a multiplier on that category's tag contribution (relevance,
+candidate pre-ranking, category shares and the dominant category); an unlisted
+category weighs `1.0`, and the default `{}` is neutral. For example
+`config={"category_weights": {"featured": 0.5}}` halves the pull of tags in the
+`featured` category. Multipliers are finite and non-negative.
+
+### Signals contract
+
+```python
+class Signals(Protocol):
+    def read(self, keys=None) -> Mapping[str, Any]: ...
+```
+
+`read(keys)` returns `{"observed_at": float, "rows": {key: row}}` with the
+current ratings, engagement counts and watch history; `None` reads every row.
+A row has `rating` (0-100 or `None`), `engagement_count` (int >= 0), `watch`
+only when the item was actually watched, and `updated_at`: the epoch seconds
+of that item's last rating, engagement or watch change, never later than
+`observed_at`.
+
+The tuner judges a past trial from these current rows, so it must know which
+rows changed after the trial's evidence cutoff. With `updated_at` on every
+row, only the items changed since the cutoff lose their facts. If any returned
+row lacks `updated_at`, the engine falls back to the global `observed_at` as
+the cutoff: while the host keeps writing, `observed_at` stays newer than every
+cutoff and tuner evidence is unavailable, so the tuner cannot promote.
+
+`feedloop.slots.check_signals(signals, keys=None)` reads once and returns a
+list of contract problems (missing `updated_at`, `updated_at` after
+`observed_at`, non-finite numbers); an empty list means the read conforms.
+
 ### Ranking identity
 
 The engine derives ranking identity from item existence plus file
@@ -319,13 +351,14 @@ fingerprints, so the same file listed twice is served once.
 
 ## Reference implementation
 
-StorageProj is one working deployment of feedloop and can be read as a worked
-example. Its Stash plugin captures watch time in the browser and forwards JSON
-events to a recording endpoint on the engine, which writes them through the
-ledger; its inference pipeline computes embeddings and writes one row per item
-and model (model name, timestamp, vector) to Postgres, and the `FeatureSpaces`
-slot reads those rows back with a revision per model; its catalog comes from
-Stash GraphQL, which supplies items, durations, tags and file fingerprints.
-The vendor capture layer is the only writer of the ledger, and the engine
-runs as a separate container. StorageProj is not part of feedloop and is named
-here only as one implementation of the three links above.
+`feedloop.sources.filesystem` is the reference implementation of all three
+links above: it serves `Catalog`, `Signals` and `FeatureSpaces` over a media
+folder, sidecars and SQLite, and the bundled server records capture events
+through the ledger. A larger deployment typically has the same shape: a
+browser or player plugin captures watch time and forwards JSON events to a
+recording endpoint that writes them through the ledger; an offline pipeline
+writes one embedding row per item and model (model name, timestamp, vector)
+to a database that a `FeatureSpaces` adapter reads back with a revision per
+model; and a `Catalog` adapter over the host's media API supplies items,
+durations, tags and file fingerprints. The capture layer is then the only
+writer of the ledger, and the engine can run as a separate service.

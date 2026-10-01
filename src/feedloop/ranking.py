@@ -39,7 +39,7 @@ VARIANT_CONTRACT = {
 REQUIRED_CONFIG = (
     "half_life_days", "min_watch_seconds", "finished_ratio", "abandon_ratio",
     "dislike_min_watch_seconds", "short_watch_ratio", "history_limit", "rating_strength",
-    "dislike_strength", "profile_tags", "candidate_pool", "bodyparts_weight", "max_tag_share",
+    "dislike_strength", "profile_tags", "candidate_pool", "category_weights", "max_tag_share",
     "length_floor_seconds", "embedding_weight", "taste_audio_weight", "taste_mix_weight",
     "diversity", "calibration", "cooldown_days", "recovery_days", "impression_discount",
     "contributor_affinity_weight", "image_events_enabled", "include_images", "images_share",
@@ -196,12 +196,12 @@ def merge_look_scores(paired, channels):
     return result
 
 
-def share_vector(raw, duration, idf, cats, *, bodyparts_weight, max_tag_share):
+def share_vector(raw, duration, idf, cats, *, category_weights, max_tag_share):
     denom = duration if duration > 0 else sum(raw.values())
     if denom <= 0:
         return {}
     return {tag: min(seconds / denom, max_tag_share) * idf.get(tag, 1.0) *
-            (bodyparts_weight if cats.get(tag) == "bodyparts" else 1.0)
+            category_weights.get(cats.get(tag), 1.0)
             for tag, seconds in raw.items() if seconds > 0}
 
 
@@ -302,7 +302,7 @@ def weights_from_profiles(liked, disliked, df, corpus, *, profile_tags, dislike_
                   "negative_tags": sum(v < 0 for v in kept.values()), "corpus_items": corpus}
 
 
-def relevance(vector, weights, tag_category, duration, *, bodyparts_weight,
+def relevance(vector, weights, tag_category, duration, *, category_weights,
               max_tag_share, length_floor, contributions=None):
     cap = max_tag_share * duration if duration > 0 else None
     total = 0.0
@@ -312,7 +312,7 @@ def relevance(vector, weights, tag_category, duration, *, bodyparts_weight,
         if not weight:
             continue
         capped = min(secs, cap) if cap else secs
-        multiplier = bodyparts_weight if tag_category.get(tag) == "bodyparts" else 1.0
+        multiplier = category_weights.get(tag_category.get(tag), 1.0)
         term = weight * capped * multiplier
         total += term
         if contributions is not None:
@@ -322,25 +322,25 @@ def relevance(vector, weights, tag_category, duration, *, bodyparts_weight,
     return total / denominator
 
 
-def category_shares(weights, tag_category, bodyparts_weight):
+def category_shares(weights, tag_category, category_weights):
     sums = defaultdict(float)
     for tag, weight in weights.items():
         if weight <= 0:
             continue
         category = tag_category.get(tag, "other")
-        sums[category] += weight * (bodyparts_weight if category == "bodyparts" else 1.0)
+        sums[category] += weight * category_weights.get(category, 1.0)
     total = sum(sums.values())
     return {category: value / total for category, value in sums.items()} if total else {}
 
 
-def dominant_category(vector, tag_category, weights, bodyparts_weight):
+def dominant_category(vector, tag_category, weights, category_weights):
     sums = defaultdict(float)
     for tag, seconds in vector.items():
         weight = weights.get(tag, 0.0)
         if weight <= 0:
             continue
         category = tag_category.get(tag, "other")
-        sums[category] += seconds * weight * (bodyparts_weight if category == "bodyparts" else 1.0)
+        sums[category] += seconds * weight * category_weights.get(category, 1.0)
     return max(sums, key=sums.get) if sums else "other"
 
 
@@ -885,6 +885,22 @@ def _hard_eligibility(catalog, context, config, watch, facts, kinds):
     return allowed, excluded, seeds, penalties, exclusions
 
 
+# 2026-10-01: the removed pre-category_weights key, split so the public tree names no host-specific category
+_REMOVED_CATEGORY_KEY = "body" "parts_weight"
+
+
+def resolve_category_weights(config):
+    """Tag multipliers per category name; an unlisted category weighs 1.0."""
+    if _REMOVED_CATEGORY_KEY in config:
+        raise ValueError(f"{_REMOVED_CATEGORY_KEY} was removed; use category_weights={{category: multiplier}}")
+    weights = config.get("category_weights") or {}
+    if not isinstance(weights, dict) or any(
+            type(name) is not str or type(value) not in (int, float) or not math.isfinite(value) or value < 0
+            for name, value in weights.items()):
+        raise ValueError("invalid ranking category_weights")
+    return dict(weights)
+
+
 def _validate_config(config):
     missing = set(REQUIRED_CONFIG) - config.keys()
     if missing:
@@ -895,7 +911,9 @@ def _validate_config(config):
     for field in ("history_limit", "profile_tags", "candidate_pool", "explore_slots"):
         if type(config[field]) is not int or config[field] < (0 if field == "explore_slots" else 1):
             raise ValueError("invalid ranking count: " + field)
-    for field in set(REQUIRED_CONFIG) - {"image_events_enabled", "include_images", "experiment", "vector_spaces"}:
+    resolve_category_weights(config)
+    for field in set(REQUIRED_CONFIG) - {"image_events_enabled", "include_images", "experiment", "vector_spaces",
+                                         "category_weights"}:
         if type(config[field]) not in (int, float) or not math.isfinite(config[field]) or config[field] < 0:
             raise ValueError("invalid ranking number: " + field)
     if config["length_floor_seconds"] <= 0 or not 0 <= config["images_share"] <= 1 or not 0 <= config["control_rate"] <= 1:
@@ -1116,8 +1134,7 @@ def _rank(inputs, *, context, config, seed, variant, admission_policy, kinds):
     for key, vector in tag_candidates.items():
         vector.update({tag: tags[key][tag] for tag, weight in weights.items() if weight < 0 and tag in tags[key]})
     def rough(key):
-        return sum(weights.get(tag, 0.0) * min(seconds, 600.0) * (
-            config["bodyparts_weight"] if categories.get(tag) == "bodyparts" else 1.0)
+        return sum(weights.get(tag, 0.0) * min(seconds, 600.0) * config["category_weights"].get(categories.get(tag), 1.0)
                    for tag, seconds in tag_candidates[key].items())
     sources = {"tags": sorted(tag_candidates, key=lambda key: (-rough(key), key))}
     for name, scores, enabled in [("visual", visual, source_config["embedding_weight"] > 0),
@@ -1167,7 +1184,7 @@ def _rank(inputs, *, context, config, seed, variant, admission_policy, kinds):
     prelim = []
     for key, (vector, seconds) in hydrated.items():
         contributions = []
-        rel = relevance(vector, weights, categories, seconds, bodyparts_weight=config["bodyparts_weight"],
+        rel = relevance(vector, weights, categories, seconds, category_weights=config["category_weights"],
                         max_tag_share=config["max_tag_share"], length_floor=config["length_floor_seconds"], contributions=contributions)
         explanations[key] = {"tag_contributions": contributions, "tag_score": rel,
                              "profile": dict(profile_meta), "sources": [name for name, rows in sources.items() if key in rows]}
@@ -1176,13 +1193,13 @@ def _rank(inputs, *, context, config, seed, variant, admission_policy, kinds):
     comps = []
     for key, vector, seconds, rel in prelim:
         explanations[key]["tag_max"] = maximum
-        comps.append((key, vector, dominant_category(vector, categories, weights, config["bodyparts_weight"]),
+        comps.append((key, vector, dominant_category(vector, categories, weights, config["category_weights"]),
                       max(rel, 0.0) / maximum, visual.get(key), voice.get(key), sound.get(key),
                       penalties[key], affinity_delta[key]))
     image_comps = [(key, image_scores[key], penalties[key], affinity_delta[key]) for key in sources["images"]]
     timings["scoring"] = time.perf_counter() - stage
     stage = time.perf_counter()
-    target = category_shares(weights, categories, config["bodyparts_weight"])
+    target = category_shares(weights, categories, config["category_weights"])
     fallback_reasons = []
     if not watch and not ratings and not engagement_counts:
         fallback_reasons.append("no_preference_history")

@@ -505,3 +505,14 @@ def test_moment_selection_is_deterministic_across_two_runs():
         read = _moment_windows(QUERY)
         return [{sid: engine_module.choose_moment(times, seed=seed, sid=sid) for sid, times in read.items()} for seed in (0, 7, 2**62)]
     assert run() == run()
+
+
+def test_check_signals_reports_contract_breaks():
+    from feedloop.slots import check_signals
+    signals = MemorySignals({("video", 1): {"rating": 80, "engagement_count": 1, "updated_at": 90.0},
+                             ("video", 2): {"rating": 60, "engagement_count": 0},
+                             ("video", 3): {"rating": float("nan"), "engagement_count": 0, "updated_at": 120.0}},
+                            observed_at=100.0)
+    assert check_signals(signals, [("video", 1)]) == []
+    assert check_signals(signals) == ["video:2: missing updated_at", "video:3: updated_at is after observed_at",
+                                      "video:3: rating is not finite"]

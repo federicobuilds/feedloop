@@ -168,7 +168,7 @@ def fixture(seed, size=40):
     rng = random.Random(seed)
     scored = [(rng.choice([0.1, 0.5, 1.0]), sid,
                {t: rng.random() for t in rng.sample(range(30), rng.randrange(12))},
-               rng.choice(["acts", "bodyparts", "other"])) for sid in range(size)]
+               rng.choice(["acts", "featured", "other"])) for sid in range(size)]
     return sorted(scored, key=lambda x: x[0], reverse=True)
 
 
@@ -176,7 +176,7 @@ def raw_config(**changes):
     config = dict(half_life_days=21.0, min_watch_seconds=20.0, finished_ratio=0.45,
                   abandon_ratio=0.15, dislike_min_watch_seconds=60.0, short_watch_ratio=0.5,
                   history_limit=600, rating_strength=1.0, dislike_strength=1.0, profile_tags=24,
-                  candidate_pool=600, bodyparts_weight=0.3, max_tag_share=0.35, length_floor_seconds=120.0,
+                  candidate_pool=600, category_weights={"featured": 0.3}, max_tag_share=0.35, length_floor_seconds=120.0,
                   embedding_weight=0.35, taste_audio_weight=0.1, taste_mix_weight=0.1,
                   diversity=0.35, calibration=0.25, cooldown_days=0.0, recovery_days=0.0,
                   impression_discount=0.95, contributor_affinity_weight=0.5,
@@ -812,11 +812,17 @@ class ImageContracts(OfflineTestCase):
 
 
 class ScoringPreservationContracts(OfflineTestCase):
-    def test_negative_tags_caps_length_and_bodypart_damping(self):
-        kw = dict(bodyparts_weight=0.3, max_tag_share=0.35, length_floor=120)
-        score = RANKING.relevance({1: 600, 2: 600}, {1: 1, 2: -1}, {2: "bodyparts"}, 600, **kw)
+    def test_negative_tags_caps_length_and_category_damping(self):
+        kw = dict(category_weights={"featured": 0.3}, max_tag_share=0.35, length_floor=120)
+        score = RANKING.relevance({1: 600, 2: 600}, {1: 1, 2: -1}, {2: "featured"}, 600, **kw)
         self.assertAlmostEqual(score, (210 - 63) / 600)
         self.assertAlmostEqual(RANKING.relevance({1: 30}, {1: 1}, {}, 30, **kw), 10.5 / 120)
+
+    def test_category_weights_replace_the_removed_single_category_key(self):
+        self.assertEqual(RANKING.resolve_category_weights({}), {})
+        removed = "body" "parts_weight"
+        with self.assertRaisesRegex(ValueError, "use category_weights"):
+            RANKING.resolve_category_weights({removed: 0.3})
 
     def test_embedding_normalization_stays_max_anchored(self):
         comps = [(1, {}, "acts", 0.5, 0.8, None, None, 1.0, None),
@@ -835,7 +841,7 @@ class SelectionContracts(OfflineTestCase):
             scored = fixture(seed)
             for want in [0, 1, 20, 45]:
                 kw = dict(want=want, diversity=0.35, calibration=0.25,
-                          target_shares={"acts": 0.7, "bodyparts": 0.1})
+                          target_shares={"acts": 0.7, "featured": 0.1})
                 self.assertEqual(RANKING.select(scored, **kw), old_select(scored, cosine=RANKING.cosine, **kw))
                 similar = pick_sim([(*s[:3], "other") for s in scored], pool_size=len(scored), diversity=0.35, details={})
                 kw.update(want=want or 20, calibration=0, target_shares={})

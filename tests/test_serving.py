@@ -616,7 +616,7 @@ class TestDashboardSharedContracts:
 
         def summary(cand_offset):
             trials = [{"arm": arm, "reward": (.2 if arm == "base" else .2 + cand_offset) + ((s * 7 + i) % 5) * .01,
-                       "category": "acts" if arm == "base" else ("acts", "other", "bodyparts")[(s + i) % 3],
+                       "category": "acts" if arm == "base" else ("acts", "other", "featured")[(s + i) % 3],
                        "liked": False, "viewed_id": f"{arm}-{s}-{i}", "kind": "video", "item_id": s * 10 + i}
                       for s in range(20) for i in range(4) for arm in ("base", "cand")]
             sessions = {}

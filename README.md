@@ -288,6 +288,12 @@ names and types, the attribution rules, and a synthetic capture example.
 
 ## Limits (v0.x)
 
+- Tag categories carry no built-in weighting. Earlier releases damped one
+  fixed category by `0.3` by default; that special case is gone. Set
+  `category_weights={"<category>": 0.3}` to keep the old effect for your own
+  category; the removed key is rejected with an error that names
+  `category_weights`. See [docs/integration.md](docs/integration.md).
+
 - The slot contracts are proven against the filesystem source only and may
   change before 1.0.
 - Search needs window rows with real timestamps (sidecar `segments` or a timed
