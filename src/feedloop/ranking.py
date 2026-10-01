@@ -885,14 +885,8 @@ def _hard_eligibility(catalog, context, config, watch, facts, kinds):
     return allowed, excluded, seeds, penalties, exclusions
 
 
-# 2026-10-01: the removed pre-category_weights key, split so the public tree names no host-specific category
-_REMOVED_CATEGORY_KEY = "body" "parts_weight"
-
-
 def resolve_category_weights(config):
     """Tag multipliers per category name; an unlisted category weighs 1.0."""
-    if _REMOVED_CATEGORY_KEY in config:
-        raise ValueError(f"{_REMOVED_CATEGORY_KEY} was removed; use category_weights={{category: multiplier}}")
     weights = config.get("category_weights") or {}
     if not isinstance(weights, dict) or any(
             type(name) is not str or type(value) not in (int, float) or not math.isfinite(value) or value < 0

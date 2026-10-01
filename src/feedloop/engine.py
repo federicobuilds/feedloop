@@ -160,7 +160,6 @@ class Engine:
         self.kinds = tuple(kinds)
         self.tag_namespace = tag_namespace
         self.config = {**DEFAULT_CONFIG, **(config or {})}
-        ranking.resolve_category_weights(self.config)
         self.roles = dict(space_roles)
         self.read_current, self.apply_change = read_current, apply_change
         self.attribution = {**DEFAULT_ATTRIBUTION, **(attribution or {})}

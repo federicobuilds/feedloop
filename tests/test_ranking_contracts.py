@@ -818,12 +818,6 @@ class ScoringPreservationContracts(OfflineTestCase):
         self.assertAlmostEqual(score, (210 - 63) / 600)
         self.assertAlmostEqual(RANKING.relevance({1: 30}, {1: 1}, {}, 30, **kw), 10.5 / 120)
 
-    def test_category_weights_replace_the_removed_single_category_key(self):
-        self.assertEqual(RANKING.resolve_category_weights({}), {})
-        removed = "body" "parts_weight"
-        with self.assertRaisesRegex(ValueError, "use category_weights"):
-            RANKING.resolve_category_weights({removed: 0.3})
-
     def test_embedding_normalization_stays_max_anchored(self):
         comps = [(1, {}, "acts", 0.5, 0.8, None, None, 1.0, None),
                  (2, {}, "acts", 0.0, 0.4, None, None, 1.0, None)]
