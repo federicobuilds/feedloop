@@ -1033,7 +1033,7 @@ def _outcome_owner(row, by_id, claims, mappings, window_s):
         owner = by_id.get(claims.get(row["corrects_id"]))
         return owner, None if owner else "original_unresolved"
     if not _mapping_valid(row, mappings):
-        return None, "session_mapping_changed" if row["canonical_session_id"] else "session_mapping_unresolved"
+        return None, "session_mapping_changed" if row["canonical_session_id"] else "session_mapping_missing"
     if not row["parent_id"]:
         return None, "source_completeness_unavailable"
     parent = by_id.get(row["parent_id"])
@@ -1192,10 +1192,6 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
             reasons.append("attribution_pending")
         if any(r["event_type"] == "outcome" and r["payload"]["provenance"] != "confirmed_delta_v1" for r in kept):
             reasons.append("unknown_source_provenance")
-        if any(not r["identity_valid"] and r["canonical_session_id"] is not None for r in kept):
-            reasons.append("session_mapping_changed")
-        if any(r["canonical_session_id"] is None for r in kept):
-            reasons.append("session_mapping_unresolved")
         claim_map = {r["outcome_id"]: r["viewed_id"] for r in all_claims}
         provisional = []
         if runs:
@@ -1371,7 +1367,7 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
         grouped.setdefault(claim["viewed_id"], []).append(events[claim["outcome_id"]])
     selected_views = set(evidence["viewed_ids"])
     view_blockers = evidence.get("view_blockers", {})
-    linked_views, linked_pending = set(), set()
+    linked_views, linked_pending, checked = set(), set(), set()
     for event in evidence["events"]:
         if event["event_id"] not in selected_views:
             continue
@@ -1410,6 +1406,7 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
         liked = disliked = reward = None
         trial_reasons = []
         for row in (event, served, req, *rows):
+            checked.add(row.get("event_id") or row["request_id"])
             if not row["identity_valid"]:
                 reason = row.get("identity_reason") or "session_mapping_changed"
                 if reason not in trial_reasons:
@@ -1459,6 +1456,11 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
     unlinked = [reason for eid, codes in view_blockers.items() if eid not in linked_views for reason in codes]
     unlinked += [p["reason"] for p in evidence["provisional"] if p["outcome_id"] not in linked_pending
                  and p["reason"] not in ("outside_attribution_window", "pre_exposure_watch")]
+    # 2026-10-01: identity failures on rows no eligible trial uses are diagnostics, not blockers;
+    # unattributed outcomes are already counted through provisional above.
+    provisional_ids = {p["outcome_id"] for p in evidence["provisional"]}
+    unlinked += [row.get("identity_reason") or "session_mapping_changed" for row in (*evidence["events"], *evidence["requests"])
+                 if not row["identity_valid"] and (row.get("event_id") or row["request_id"]) not in checked | provisional_ids]
     for reason in unlinked:
         diagnostics[reason] = diagnostics.get(reason, 0) + 1
     if not result["trials"]:

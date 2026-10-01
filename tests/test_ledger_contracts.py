@@ -216,10 +216,9 @@ class EventContracts(unittest.TestCase):
                 canonical_session_id="canonical-2", mapping_revision="mapping-2")
         self.attribute()
         evidence = self.evidence()
-        self.assertIn("session_mapping_changed", evidence["validity_reasons"])
+        self.assertIn("session_mapping_changed", self.summary(watched=30)["excluded"])
         self.assertEqual([(r["outcome_id"], r["viewed_id"]) for r in evidence["attributions"]], [(original, vid)])
-        old = self.events.read_evidence(self.db, since_ts=95, through_ts=250)
-        self.assertNotIn("session_mapping_changed", old["validity_reasons"])
+        self.assertNotIn("session_mapping_changed", self.summary(watched=30, cutoff=250)["excluded"])
 
     def test_cached_page_cannot_be_relabelled_with_new_experiment(self):
         first = request()
@@ -431,6 +430,19 @@ class EventContracts(unittest.TestCase):
         self.assertTrue(summary["valid"], summary["validity_reasons"])
         self.assertEqual(len(summary["trials"]), 2)
 
+    def test_unmapped_session_excludes_its_own_trial_and_is_a_diagnostic_elsewhere(self):
+        self.two_trials()
+        self.events.record_event(self.db, event=outcome("ghost", ts=300, session="ghost-session", item_id=7))
+        parent = self.events.record_served(self.db, request=request("page-3", session="unmapped"), items=[item(3)])
+        self.events.record_event(self.db, event=view(parent[("video", 3)], key="view-3", session="unmapped", item_id=3))
+        self.attribute()
+        summary = self.events.summarize_trials(self.evidence(), verdict=verdict, trial_reward=trial_reward,
+            cumulative_at_cutoff={"cutoff_ts": 500, "items": {("video", i): self.FACTS for i in (1, 2, 3)}})
+        self.assertTrue(summary["valid"], summary["validity_reasons"])
+        self.assertEqual([t["item_id"] for t in summary["trials"]], [1, 2])
+        self.assertEqual(summary["excluded"], {"session_mapping_missing": 1})
+        self.assertGreaterEqual(summary["excluded_diagnostics"].get("session_mapping_missing", 0), 1)
+
     def test_missing_cumulative_facts_exclude_only_that_trial(self):
         self.two_trials()
         summary = self.two_summary({("video", 1): self.FACTS})
@@ -622,7 +634,7 @@ class EventContracts(unittest.TestCase):
         vid = self.record_view(parent, session="unresolved")
         self.events.record_event(self.db, event=outcome(parent=vid, session="unresolved"))
         self.assertEqual(self.attribute(), 0)
-        self.assertIn("session_mapping_unresolved", self.evidence()["validity_reasons"])
+        self.assertEqual(self.summary(watched=30)["excluded"], {"session_mapping_missing": 1})
 
     def test_cache_delivery_preserves_original_binding_and_order(self):
         first = request()

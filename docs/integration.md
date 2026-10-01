@@ -151,7 +151,7 @@ The tuner judges only the active experiment's cohort: `read_evidence(...,
 experiment={"knob", "base", "candidate"})` selects the requests whose stamped
 `config.experiment` carries that arm state, whatever context their
 `experiment_id` hashes. Unresolved feedback, quarantined watch captures and
-unattributable outcomes count only against the trials they link to (feedback by
+unattributable outcomes and missing or changed session identity count only against the trials they link to (feedback by
 view, request or item; captures by view; outcomes by session and item inside the
 trial's attribution window); such a trial is excluded
 (`excluded_trials`, `excluded`) and the rest still count. Records linked to no
