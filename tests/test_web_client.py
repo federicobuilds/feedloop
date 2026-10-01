@@ -115,6 +115,8 @@ def test_image_cards_expose_a_view_chip_and_open_the_host_page_or_viewer():
     assert 'document.createElement(page ? "a" : "button")' in thumb and "openViewer(item, opener)" in thumb
     # the Feed image stage opens the same target through the existing shortcut guards
     assert "open_url" in feed and "openViewer(" in feed and 'mediaBox.addEventListener("click"' in feed
+    # 2026-10-01: the Feed image cell carries the same visible chip, opening the same target
+    assert 'chip.className = "play-chip view-chip"' in feed and '"View image"' in feed and 'openImage(item, cell)' in feed
 
 
 def test_feed_page_carries_the_fields_the_cards_read(ctx):

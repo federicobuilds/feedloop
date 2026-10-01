@@ -126,7 +126,15 @@ export function mountFeed(host) {
         paintMute(mute);
         mute.onclick = () => setMuted(!muted, true);
         mediaBox.appendChild(mute);
-      } else mediaBox.addEventListener("click", () => openImage(item, cell));
+      } else {
+        const chip = document.createElement("button");
+        chip.type = "button"; chip.className = "play-chip view-chip";
+        chip.setAttribute("aria-label", "View image");
+        chip.append(icon(item.animated_image ? "play" : "view"), "View");
+        chip.onclick = event => { event.stopPropagation(); openImage(item, cell); };
+        mediaBox.appendChild(chip);
+        mediaBox.addEventListener("click", () => openImage(item, cell));
+      }
       const side = document.createElement("div");
       side.className = "card-side";
       const title = document.createElement("h2"); title.className = "card-title"; title.textContent = item.title || ("Item " + item.id);
