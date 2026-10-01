@@ -104,6 +104,19 @@ def test_animated_image_items_render_an_img_and_attach_no_player():
     assert 'mediaBox.querySelector("video")' in feed
 
 
+def test_image_cards_expose_a_view_chip_and_open_the_host_page_or_viewer():
+    root = web_root()
+    cards, feed, icons = ((root / name).read_text() for name in ("cards.js", "feed.js", "icons.js"))
+    thumb = cards[cards.index("function thumb("):cards.index("const SIDECAR_REASONS")]
+    # an image card carries a centered chip (the eye icon; play for an animated image), and its
+    # opener is still the host page link or the full-size dialog, named "View image"
+    assert "view:" in icons and 'icon(item.animated_image ? "play" : "view")' in thumb
+    assert 'chip.className = "play-chip view-chip"' in thumb and '"View image"' in thumb
+    assert 'document.createElement(page ? "a" : "button")' in thumb and "openViewer(item, opener)" in thumb
+    # the Feed image stage opens the same target through the existing shortcut guards
+    assert "open_url" in feed and "openViewer(" in feed and 'mediaBox.addEventListener("click"' in feed
+
+
 def test_feed_page_carries_the_fields_the_cards_read(ctx):
     ctx.clock.advance(30)
     status, page = request(ctx, "POST", "/api/feed", feed_request())

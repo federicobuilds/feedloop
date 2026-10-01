@@ -183,6 +183,7 @@ details.ai-explanation-raw pre { margin: 4px 0 8px; white-space: pre-wrap; overf
   background: rgba(10, 11, 13, .82); font-size: var(--t-12); opacity: 0; transition: opacity var(--fast); }
 .play-chip .icon { width: 14px; height: 14px; }
 .card:hover .play-chip, .thumb-open:focus-visible .play-chip { opacity: 1; }
+.view-chip { left: 50%; top: 50%; bottom: auto; transform: translate(-50%, -50%); opacity: 1; }
 .badge { position: absolute; right: 8px; bottom: 8px; padding: 0 6px; border-radius: 4px; background: rgba(10, 11, 13, .82); font-size: var(--t-12); line-height: 20px; pointer-events: none; }
 .thumb.is-live .badge { display: none; }
 .card .body { padding: 12px 0 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }

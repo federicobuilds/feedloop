@@ -6,13 +6,21 @@ import { deliverFeed, isStaleCursor, itemKey } from "./api.js";
 import { building, formatTime, partial, setState } from "./state.js";
 import { evidenceStrip, explanation } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
-import { media, metaLine, similarLink, stopVideos, whyText } from "./cards.js";
+import { media, metaLine, openViewer, similarLink, stopVideos, whyText } from "./cards.js";
 import { observeView } from "./watch.js";
 import { icon } from "./icons.js";
 
 /* Shortcuts never take keys meant for a control, the player, or a modified chord. */
 function ownsKeys(target) {
   return !!(target.closest && target.closest("input, textarea, select, button, video, audio, summary, [contenteditable]:not([contenteditable='false'])"));
+}
+
+/* An image cell has no player, so its stage is the control: the host's own page when the
+   item carries open_url, the full-size viewer otherwise. It rides the same keydown guards
+   as the video shortcuts below (ownsKeys and the modifier check). */
+function openImage(item, opener) {
+  if (item.open_url) window.location.assign(item.open_url);
+  else openViewer(item, opener);
 }
 
 const MUTE_KEY = "feedloop-muted";
@@ -118,7 +126,7 @@ export function mountFeed(host) {
         paintMute(mute);
         mute.onclick = () => setMuted(!muted, true);
         mediaBox.appendChild(mute);
-      }
+      } else mediaBox.addEventListener("click", () => openImage(item, cell));
       const side = document.createElement("div");
       side.className = "card-side";
       const title = document.createElement("h2"); title.className = "card-title"; title.textContent = item.title || ("Item " + item.id);
@@ -208,7 +216,9 @@ export function mountFeed(host) {
     else if (key === " " && current) {
       const video = current.querySelector("video");
       if (video) { event.preventDefault(); if (video.paused) video.play().catch(() => {}); else video.pause(); }
+      else { event.preventDefault(); openImage(state.items[index], current); }
     }
+    else if (key === "Enter" && current && !current.querySelector("video")) { event.preventDefault(); openImage(state.items[index], current); }
   });
   fetchMore();
   return { dispose() { state.generation++; feedState(null); stage.disconnect(); stopVideos(host); document.removeEventListener("visibilitychange", onVisibility); if (col.__nearObserver) col.__nearObserver.disconnect(); state.observers.forEach(o => o.disconnect()); }, state, fetchMore };

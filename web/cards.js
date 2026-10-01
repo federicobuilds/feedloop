@@ -140,7 +140,7 @@ export function media(item, { root = null, eager = false } = {}) {
 }
 
 let viewer = null, viewerOpener = null;
-function openViewer(item, opener) {
+export function openViewer(item, opener) {
   if (!viewer) {
     viewer = document.createElement("dialog");
     viewer.className = "viewer";
@@ -179,9 +179,14 @@ function thumb(item, eager) {
   opener.className = "thumb-open";
   if (item.kind !== "video" || item.animated_image) {
     box.appendChild(image(item, eager));
+    const chip = document.createElement("span");
+    chip.className = "play-chip view-chip";
+    chip.setAttribute("aria-hidden", "true");
+    chip.append(icon(item.animated_image ? "play" : "view"), "View");
+    opener.appendChild(chip);
     if (page) opener.setAttribute("aria-label", "Open " + titleOf(item));
     else {
-      opener.setAttribute("aria-label", "View " + titleOf(item) + " full size");
+      opener.setAttribute("aria-label", "View image");
       opener.onclick = () => openViewer(item, opener);
     }
     box.appendChild(opener);
