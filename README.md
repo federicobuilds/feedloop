@@ -115,7 +115,10 @@ and works offline. It calls only the server's public routes (`/api/feed`,
   otherwise. Each shelf shows item counts, Load more, and a skeleton while
   loading. Hovering a card plays a
   muted preview after a short delay. Clicking it turns the card into the
-  player. Only that player counts as watching; the preview does not. An
+  player. Only that player counts as watching; the preview does not. A
+  catalog item may carry `preview_url` (a short silent clip the hover
+  preview plays instead) and `open_url` (the host's own page, which a card
+  click opens instead of the inline player). An
   empty library explains how to add media and sidecars.
 - Search: describe a look in words. A Look / Sound / Both control stays in
   sync with a typed `sound:` or `both:` prefix in both directions. The mode
@@ -288,6 +291,7 @@ names and types, the attribution rules, and a synthetic capture example.
 
 ## Limits (v0.x)
 
+- 0.8.1: optional preview_url and open_url on catalog items for grid-card previews and links.
 - 0.8.0: per-category weighting moved to category_weights={name: multiplier}; the default is neutral.
 
 - The slot contracts are proven against the filesystem source only and may

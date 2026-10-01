@@ -404,3 +404,25 @@ def test_duplicate_of_a_quarantined_watch_batch_stays_rejected(ctx, monkeypatch)
     status, retried = request(ctx, "POST", "/api/watch", unproven)
     assert status == 200 and retried["status"] == "rejected" and retried["error_code"] == "watch_view_or_session_unproven" and retried["stored_steps"] == 0
     assert committed == [] and ctx.source.read([("video", item["id"])])["rows"].get(("video", item["id"])) == history
+
+
+def test_host_preview_and_open_urls_pass_through_and_bad_schemes_drop(ctx, monkeypatch):
+    links = {1: {"preview_url": "/previews/1.mp4", "open_url": "https://host.example/items/1"},
+             2: {"preview_url": "javascript:alert(1)", "open_url": "//elsewhere.example/2"},
+             3: {"preview_url": 7, "open_url": "HTTP://host.example/items/3"}}
+    expected = {1: links[1], 2: {}, 3: {"open_url": "HTTP://host.example/items/3"}}
+    fetch = ctx.source.fetch
+
+    def fetch_with_links(keys, **kwargs):
+        payload = fetch(keys, **kwargs)
+        return {**payload, "items": [{**row, **links.get(row["id"], {})} for row in payload["items"]]}
+
+    monkeypatch.setattr(ctx.source, "fetch", fetch_with_links)
+    ctx.clock.advance(30)
+    status, feed = request(ctx, "POST", "/api/feed", feed_request(limit=40))
+    status, alike = request(ctx, "GET", "/api/similar?kind=video&id=1", auth=False)
+    assert alike["seed"] == {"kind": "video", "id": 1, "title": alike["seed"]["title"], "media_url": "/media/video/1", **links[1]}
+    served = [i for i in feed["items"] + alike["items"] if i["kind"] == "video" and i["id"] in expected]
+    assert {i["id"] for i in feed["items"] if i["kind"] == "video"} >= {1, 2, 3} and served
+    for item in served:
+        assert {k: item[k] for k in ("preview_url", "open_url") if k in item} == expected[item["id"]], item["id"]

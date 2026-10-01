@@ -101,13 +101,14 @@ export function stopVideos(root) {
   });
 }
 
-function openVideo(video, item, root) {
-  video.__start = startOf(item);
+/* A host preview clip plays from its start; the item itself opens at the matching moment. */
+function openVideo(video, item, root, preview) {
+  video.__start = preview ? 0 : startOf(item);
   video.preload = "metadata"; video.playsInline = true;
   video.addEventListener("loadedmetadata", () => {
     if (video.__start > 0 && video.__start >= video.duration) { video.__start = 0; video.currentTime = 0; }
   });
-  nearSource(video, item.media_url + "#t=" + video.__start, root);
+  nearSource(video, preview || item.media_url + "#t=" + video.__start, root);
 }
 
 function image(item, eager) {
@@ -172,42 +173,52 @@ function thumb(item, eager) {
   const box = document.createElement("div");
   box.className = "thumb";
   if (!item.media_url) return placeholder(box);
-  const opener = document.createElement("button");
-  opener.type = "button";
+  const page = item.open_url;
+  const opener = document.createElement(page ? "a" : "button");
+  if (page) opener.href = page; else opener.type = "button";
   opener.className = "thumb-open";
   if (item.kind !== "video") {
     box.appendChild(image(item, eager));
-    opener.setAttribute("aria-label", "View " + titleOf(item) + " full size");
-    opener.onclick = () => openViewer(item, opener);
+    if (page) opener.setAttribute("aria-label", "Open " + titleOf(item));
+    else {
+      opener.setAttribute("aria-label", "View " + titleOf(item) + " full size");
+      opener.onclick = () => openViewer(item, opener);
+    }
     box.appendChild(opener);
     return box;
   }
   const video = document.createElement("video");
   video.muted = true; video.tabIndex = -1;
   video.setAttribute("aria-label", titleOf(item));
-  openVideo(video, item, null);
+  const preview = item.preview_url;
+  openVideo(video, item, null, preview);
   box.appendChild(video);
   const duration = durationOf(item);
   if (duration) durationBadge(box, duration);
-  else video.addEventListener("loadedmetadata", () => { if (Number.isFinite(video.duration)) durationBadge(box, video.duration); }, { once: true });
+  else if (!preview) video.addEventListener("loadedmetadata", () => { if (Number.isFinite(video.duration)) durationBadge(box, video.duration); }, { once: true });
   const chip = document.createElement("span"); chip.className = "play-chip"; chip.setAttribute("aria-hidden", "true");
   chip.append(icon("play"), "Play");
   opener.appendChild(chip);
-  opener.setAttribute("aria-label", "Play " + titleOf(item));
+  opener.setAttribute("aria-label", (page ? "Open " : "Play ") + titleOf(item));
   box.appendChild(opener);
   let timer = null, live = false;
-  box.addEventListener("mouseenter", () => {
-    if (live || reducedMotion.matches || !video.getAttribute("src")) return;
+  const startPreview = () => {
+    if (live || timer || reducedMotion.matches || !video.getAttribute("src")) return;
     timer = setTimeout(() => { video.loop = true; video.play().catch(() => {}); }, PREVIEW_DELAY_MS);
-  });
-  box.addEventListener("mouseleave", () => {
+  };
+  const stopPreview = () => {
     clearTimeout(timer); timer = null;
     if (!live) { video.pause(); if (video.readyState) video.currentTime = video.__start; }
-  });
+  };
+  box.addEventListener("mouseenter", startPreview);
+  box.addEventListener("mouseleave", stopPreview);
+  if (preview) { opener.addEventListener("focus", startPreview); opener.addEventListener("blur", stopPreview); }
+  if (page) return box;
   opener.onclick = () => {
     if (live) return;
     live = true; clearTimeout(timer);
-    if (!video.getAttribute("src")) video.__loadSource();
+    if (preview) { video.__start = startOf(item); video.src = item.media_url + "#t=" + video.__start; }
+    else if (!video.getAttribute("src")) video.__loadSource();
     video.pause(); video.loop = false; if (video.readyState) video.currentTime = video.__start;
     video.muted = false; video.controls = true; video.tabIndex = 0;
     box.classList.add("is-live"); opener.remove();
@@ -254,9 +265,9 @@ export function gridCard(item, { headingLevel = 2, eager = false } = {}) {
   body.className = "body";
   const title = document.createElement("h" + headingLevel); title.className = "card-heading"; title.textContent = titleOf(item); title.title = titleOf(item);
   const why = explanation(item);
-  const reason = document.createElement("p"); reason.className = "reason"; reason.textContent = whyText(item, reason, box.querySelector("video")); reason.title = reason.textContent;
+  const reason = document.createElement("p"); reason.className = "reason"; reason.textContent = whyText(item, reason, item.preview_url ? null : box.querySelector("video")); reason.title = reason.textContent;
   const extras = item.kind === "video" ? [similarLink(item, true)] : [];
-  body.append(title, evidenceStrip(item, why), reason, metaLine(item, box.querySelector("video")), feedbackControls(item, { extras, compact: true }), why);
+  body.append(title, evidenceStrip(item, why), reason, metaLine(item, item.preview_url ? null : box.querySelector("video")), feedbackControls(item, { extras, compact: true }), why);
   card.appendChild(body);
   return card;
 }
