@@ -887,7 +887,8 @@ def _hard_eligibility(catalog, context, config, watch, facts, kinds):
 
 def resolve_category_weights(config):
     """Tag multipliers per category name; an unlisted category weighs 1.0."""
-    weights = config.get("category_weights") or {}
+    weights = config.get("category_weights")
+    weights = {} if weights is None else weights
     if not isinstance(weights, dict) or any(
             type(name) is not str or type(value) not in (int, float) or not math.isfinite(value) or value < 0
             for name, value in weights.items()):
