@@ -118,7 +118,10 @@ and works offline. It calls only the server's public routes (`/api/feed`,
   player. Only that player counts as watching; the preview does not. A
   catalog item may carry `preview_url` (a short silent clip the hover
   preview plays instead) and `open_url` (the host's own page, which a card
-  click opens instead of the inline player). An
+  click opens instead of the inline player). A catalog item may carry
+  `animated_image: true` when its media is an animated image (GIF or similar):
+  cards, Feed and the Similar seed then render an `<img>` that plays natively,
+  never a player, and it records no watch time. An
   empty library explains how to add media and sidecars.
 - Search: describe a look in words. A Look / Sound / Both control stays in
   sync with a typed `sound:` or `both:` prefix in both directions. The mode
@@ -291,6 +294,7 @@ names and types, the attribution rules, and a synthetic capture example.
 
 ## Limits (v0.x)
 
+- 0.8.3: animated_image catalog flag renders GIF-style media as an `<img>` on cards, Feed and the Similar seed, with no player or watch capture.
 - 0.8.2: tuner evidence is scoped to the active experiment's cohort; a trial-level problem excludes that trial only, unlinked records are diagnostics, and the scorecard shows recorded, evaluable and excluded counts per arm.
 - 0.8.1: optional preview_url and open_url on catalog items for grid-card previews and links.
 - 0.8.0: per-category weighting moved to category_weights={name: multiplier}; the default is neutral.

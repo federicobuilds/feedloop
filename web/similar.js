@@ -10,6 +10,21 @@ import { gridCard, stopVideos } from "./cards.js";
 let navigatedInApp = false;
 window.addEventListener("hashchange", () => { navigatedInApp = true; });
 
+/* The seed media: an <img> for an animated image, which plays natively; else a <video>
+   opened at 0.5 s. The response's animated_image decides, since the hash carries no flag. */
+function seedMedia(kind, id, info) {
+  if (info && info.animated_image) {
+    const img = document.createElement("img");
+    img.alt = ""; img.setAttribute("aria-hidden", "true");
+    img.src = info.media_url;
+    return img;
+  }
+  const video = document.createElement("video");
+  video.muted = true; video.preload = "metadata"; video.tabIndex = -1; video.setAttribute("aria-hidden", "true");
+  video.src = (info && info.media_url ? info.media_url : "/media/" + encodeURIComponent(kind) + "/" + encodeURIComponent(id)) + "#t=0.5";
+  return video;
+}
+
 export function mountSimilar(host) {
   const params = new URLSearchParams(location.hash.split("?")[1] || "");
   const id = params.get("id"), kind = params.get("kind") || "video", title = params.get("title");
@@ -33,9 +48,7 @@ export function mountSimilar(host) {
 
   view.querySelector("[data-ai-similar-back]").onclick = () => { if (navigatedInApp) history.back(); else location.hash = "#/feed"; };
 
-  const picture = document.createElement("video");
-  picture.muted = true; picture.preload = "metadata"; picture.tabIndex = -1; picture.setAttribute("aria-hidden", "true");
-  picture.src = "/media/" + encodeURIComponent(kind) + "/" + encodeURIComponent(id) + "#t=0.5";
+  let picture = seedMedia(kind, id, null);
   const words = document.createElement("div");
   const name = document.createElement("h2"); name.textContent = seedName;
   const note = document.createElement("p"); note.className = "card-meta"; note.textContent = "Seed video, id " + id;
@@ -45,11 +58,17 @@ export function mountSimilar(host) {
   change.onclick = () => { form.hidden = false; field.focus(); field.select(); };
   seed.append(picture, words, change);
 
-  /* The response names its seed; that beats the title carried in the hash. */
+  /* The response names its seed; that beats the title carried in the hash. An animated image
+     is served as an <img> so it plays natively, never as a <video> the browser cannot decode. */
   function showSeed(info) {
     if (!info || typeof info !== "object") return;
     if (info.title) { seedName = info.title; name.textContent = info.title; }
-    if (info.media_url && !picture.src.includes(info.media_url)) picture.src = info.media_url + "#t=0.5";
+    if (!!info.animated_image !== (picture.tagName === "IMG")) {
+      const next = seedMedia(kind, id, info);
+      picture.replaceWith(next); picture = next;
+    } else if (info.media_url && !picture.src.includes(info.media_url)) {
+      picture.src = info.media_url + (picture.tagName === "IMG" ? "" : "#t=0.5");
+    }
   }
 
   function run(seedId) {

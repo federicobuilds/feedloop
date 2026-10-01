@@ -128,7 +128,7 @@ export function media(item, { root = null, eager = false } = {}) {
   const box = document.createElement("div");
   box.className = "thumb";
   if (!item.media_url) return placeholder(box);
-  if (item.kind === "video") {
+  if (item.kind === "video" && !item.animated_image) {
     const video = document.createElement("video");
     video.controls = true;
     video.setAttribute("aria-label", titleOf(item));
@@ -177,7 +177,7 @@ function thumb(item, eager) {
   const opener = document.createElement(page ? "a" : "button");
   if (page) opener.href = page; else opener.type = "button";
   opener.className = "thumb-open";
-  if (item.kind !== "video") {
+  if (item.kind !== "video" || item.animated_image) {
     box.appendChild(image(item, eager));
     if (page) opener.setAttribute("aria-label", "Open " + titleOf(item));
     else {
@@ -239,7 +239,7 @@ export function metaLine(item, video) {
   meta.className = "card-meta";
   function part(text, cls) { const span = document.createElement("span"); span.textContent = text; if (cls) span.className = cls; meta.appendChild(span); return span; }
   const kind = part(KINDS[item.kind] || sentence(item.kind));
-  if (item.kind === "video") {
+  if (item.kind === "video" && !item.animated_image) {
     const duration = durationOf(item);
     if (duration) part(formatTime(duration), "num");
     else if (video) video.addEventListener("loadedmetadata", () => {

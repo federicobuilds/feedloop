@@ -244,7 +244,7 @@ details.ai-explanation-raw pre { margin: 4px 0 8px; white-space: pre-wrap; overf
 
 /* similar */
 .seed { display: flex; align-items: center; gap: 16px; padding: 12px; margin-bottom: 16px; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-media); max-width: 720px; }
-.seed video { width: 160px; aspect-ratio: 16 / 9; border-radius: var(--r-control); background: #000; object-fit: cover; flex: none; }
+.seed video, .seed img { width: 160px; aspect-ratio: 16 / 9; border-radius: var(--r-control); background: #000; object-fit: cover; flex: none; }
 .seed > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .seed h2 { overflow-wrap: anywhere; }
 .seed-change { margin-bottom: 24px; max-width: 560px; }
@@ -331,7 +331,7 @@ details.ai-explanation-raw pre { margin: 4px 0 8px; white-space: pre-wrap; overf
   .view { padding-bottom: calc(var(--tabbar) + 24px); }
   .feed-hint { display: none; }
   .engine-toolbar { margin-left: 0; width: 100%; justify-content: space-between; }
-  .seed video { width: 112px; }
+  .seed video, .seed img { width: 112px; }
   .panel { padding: 16px; }
   .arm { grid-template-columns: 9ch minmax(0, 1fr); }
   .arm .num { grid-column: 1 / -1; text-align: left; }
