@@ -460,12 +460,14 @@ class EventContracts(unittest.TestCase):
             conn.execute("INSERT INTO rec_watch_capture_imports VALUES ('src','cap',100,100,'h','quarantined','test')")
             conn.execute("INSERT INTO rec_watch_steps(source_id,event_id,capture_id,payload_json,status,stream_session_id,item_id,occurred_at) "
                          "VALUES ('src','w1','cap',?,'quarantined','stream',9,120)", (json.dumps({"viewed_event_id": "elsewhere"}),))
+            conn.execute("INSERT INTO rec_watch_steps(source_id,event_id,capture_id,payload_json,status,stream_session_id,item_id,occurred_at) "
+                         "VALUES ('src','w2','cap',?,'quarantined','stream',9,130)", (json.dumps({}),))
         evidence = self.evidence()
         self.assertEqual(evidence["view_blockers"], {})
-        self.assertEqual(evidence["excluded_diagnostics"], {"watch_capture_quarantined": 1})
+        self.assertEqual(evidence["excluded_diagnostics"], {"watch_capture_quarantined": 2})
         summary = self.two_summary({("video", 1): self.FACTS, ("video", 2): self.FACTS})
         self.assertTrue(summary["valid"], summary["validity_reasons"])
-        self.assertEqual(summary["excluded_diagnostics"], {"watch_capture_quarantined": 1})
+        self.assertEqual(summary["excluded_diagnostics"], {"watch_capture_quarantined": 2})
 
     def test_missing_cumulative_facts_exclude_only_that_trial(self):
         self.two_trials()

@@ -1118,9 +1118,9 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
             captured_outcomes = conn.execute("""SELECT count(*) FROM rec_watch_steps s JOIN rec_watch_capture_imports i
                 ON s.source_id=i.source_id AND s.capture_id=i.capture_id WHERE s.outcome_id IS NOT NULL AND i.imported_at<=?""",
                 (through_ts,)).fetchone()[0]
-            watch_quarantined_views = {r[0] for r in conn.execute("""SELECT json_extract(s.payload_json,'$.viewed_event_id')
+            watch_quarantined_views = [r[0] for r in conn.execute("""SELECT json_extract(s.payload_json,'$.viewed_event_id')
                 FROM rec_watch_steps s JOIN rec_watch_capture_imports i ON s.source_id=i.source_id AND s.capture_id=i.capture_id
-                WHERE s.status='quarantined' AND i.imported_at<=?""", (through_ts,))}
+                WHERE s.status='quarantined' AND i.imported_at<=?""", (through_ts,))]
             unresolved = [dict(r) for r in conn.execute("""SELECT o.kind,o.item_id,
                 json_extract(o.operation_json,'$.request_id') AS request_id,
                 json_extract(o.operation_json,'$.viewed_event_id') AS viewed_event_id
@@ -1215,9 +1215,10 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
             reasons.append("sync_capture_unresolved")
         if sync_gap:
             reasons.append("sync_capture_gap")
-        for eid in watch_quarantined_views & selected_views:
+        for eid in set(watch_quarantined_views) & selected_views:
             view_blockers.setdefault(eid, []).append("watch_capture_quarantined")
-        unlinked_quarantines = len(watch_quarantined_views - selected_views - {None})
+        # 2026-10-01: count every quarantined receipt not linked to a selected view, including those with no view.
+        unlinked_quarantines = sum(1 for eid in watch_quarantined_views if eid not in selected_views)
         if unlinked_quarantines:
             excluded["watch_capture_quarantined"] = unlinked_quarantines
         sessions = {}
