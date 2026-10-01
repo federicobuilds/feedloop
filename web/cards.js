@@ -265,7 +265,7 @@ export function gridCard(item, { headingLevel = 2, eager = false } = {}) {
   body.className = "body";
   const title = document.createElement("h" + headingLevel); title.className = "card-heading"; title.textContent = titleOf(item); title.title = titleOf(item);
   const why = explanation(item);
-  const reason = document.createElement("p"); reason.className = "reason"; reason.textContent = whyText(item, reason, box.querySelector("video")); reason.title = reason.textContent;
+  const reason = document.createElement("p"); reason.className = "reason"; reason.textContent = whyText(item, reason, item.preview_url ? null : box.querySelector("video")); reason.title = reason.textContent;
   const extras = item.kind === "video" ? [similarLink(item, true)] : [];
   body.append(title, evidenceStrip(item, why), reason, metaLine(item, item.preview_url ? null : box.querySelector("video")), feedbackControls(item, { extras, compact: true }), why);
   card.appendChild(body);
