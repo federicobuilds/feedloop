@@ -43,6 +43,12 @@ def host_links(row):
     return links
 
 
+def media_flags(row):
+    """The optional ``animated_image`` flag of a catalog row, kept only when it is exactly
+    boolean ``True``; any other value is dropped, so the client never trusts a truthy string."""
+    return {"animated_image": True} if row.get("animated_image") is True else {}
+
+
 class CatalogMissing(Exception):
     """Some explicitly requested keys are absent, nothing else. args[0] is the frozenset of ItemKey."""
 

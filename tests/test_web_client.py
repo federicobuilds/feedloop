@@ -84,6 +84,26 @@ def test_grid_cards_use_host_preview_and_open_urls():
     assert 'video.src = item.media_url + "#t=" + video.__start' in thumb and "item.preview_url" not in cards[:cards.index("function thumb(")]
 
 
+def test_animated_image_items_render_an_img_and_attach_no_player():
+    root = web_root()
+    cards, feed, similar = ((root / name).read_text() for name in ("cards.js", "feed.js", "similar.js"))
+    media = cards[cards.index("export function media("):cards.index("let viewer")]
+    thumb = cards[cards.index("function thumb("):cards.index("const SIDECAR_REASONS")]
+    meta = cards[cards.index("export function metaLine"):]
+    # the Feed player and the grid card media build a <video> only for a real video; an
+    # animated image falls to the else branch's <img>, so watch capture is never reached
+    assert 'item.kind === "video" && !item.animated_image' in media
+    assert media.index("!item.animated_image") < media.index("attachPlayer(video, item)")
+    assert "box.appendChild(image(item, eager))" in media
+    assert 'item.kind !== "video" || item.animated_image' in thumb
+    # duration is omitted from both the card badge path and the meta line for animated images
+    assert 'item.kind === "video" && !item.animated_image' in meta
+    # the Similar seed builds an <img> for an animated image seed
+    assert "animated_image" in similar and 'document.createElement("img")' in similar
+    # the Feed reads its player, mute control and jump button from the media box's video
+    assert 'mediaBox.querySelector("video")' in feed
+
+
 def test_feed_page_carries_the_fields_the_cards_read(ctx):
     ctx.clock.advance(30)
     status, page = request(ctx, "POST", "/api/feed", feed_request())

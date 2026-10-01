@@ -343,7 +343,8 @@ def search(sources: Sources, query, mode="look", *, config=None, context=None, o
         row = rows.get(key)
         if not row or not row.get("files"):
             continue
-        out.append({"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url"), **catalog_module.host_links(row),
+        out.append({"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url"),
+                    **catalog_module.host_links(row), **catalog_module.media_flags(row),
                     "duration_s": row.get("duration_s"), "score": round(float(score), 6),
                     "search": {"space": space, "query_score": round(float(score), 6), "best_window_similarity": round(mx, 4),
                                "item_mean_similarity": round(mean_s, 4), "best_t": round(float(best_t), 1),
@@ -586,7 +587,8 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
         if not row:
             continue
         top = sorted(details[key].get("tag_contributions", []), key=lambda r: abs(r["contribution"]), reverse=True)[:TOP_CONTRIBS]
-        out.append({"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url"), **catalog_module.host_links(row),
+        out.append({"kind": key[0], "id": key[1], "title": row.get("title"), "media_url": row.get("media_url"),
+                    **catalog_module.host_links(row), **catalog_module.media_flags(row),
                     "duration_s": row.get("duration_s"), "score": round(score_by_key.get(key, 0.0), 6),
                     "similar": {"source_rank": source_rank, **details.get(key, {}), "seed_ids": [k[1] for k in seeds],
                                 "contributors": [{**r, "category": cats.get(r["tag_id"], "other"),

@@ -466,7 +466,8 @@ class Engine:
             if nearest and (rows.get((nearest["kind"], nearest["id"])) or {}).get("title"):
                 explanation["nearest_like"] = {**nearest, "title": rows[(nearest["kind"], nearest["id"])]["title"]}
             items.append({"kind": key[0], "id": key[1], "score": row["score"], "explanation": explanation, "best_t": row.get("best_t"),
-                          "title": source.get("title"), "media_url": source.get("media_url"), **catalog_module.host_links(source),
+                          "title": source.get("title"), "media_url": source.get("media_url"),
+                          **catalog_module.host_links(source), **catalog_module.media_flags(source),
                           "duration_s": float(source.get("duration_s") or 0.0), "category": category, "source_rank": position})
         # completed-generation equality: every token read before the build must read the same after it
         completed = self._committed_revisions(self.signals.read(), self._views(now))

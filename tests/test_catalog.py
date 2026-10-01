@@ -249,3 +249,22 @@ def test_same_count_fingerprint_change_invalidates_cached_content(tmp_path, monk
         second = eng._rank(cfg, limit=20, offset=0, include_secondary=False)
     assert first["ranking"]["revisions"]["catalog_fingerprints"] != second["ranking"]["revisions"]["catalog_fingerprints"]
     assert second["ranking"]["seed"] == 32
+
+
+def test_animated_image_flag_is_validated_and_passes_through():
+    # bool only: a truthy non-boolean or a false value is dropped before the item reaches the client
+    assert catalog.media_flags({"animated_image": True}) == {"animated_image": True}
+    for dropped in (False, 0, 1, "true", None):
+        assert catalog.media_flags({"animated_image": dropped}) == {}
+    assert catalog.media_flags({}) == {}
+    # the flag reaches a served Similar item, and only the flagged item carries it
+    from feedloop import discovery
+    from fl2_helpers import MemorySignals, MemorySpaces
+    rows = [catalog_row("video", i, files=[md5_file(h)]) for i, h in ((1, "a"), (2, "b"), (3, "c"))]
+    rows[2]["animated_image"] = True
+    features = {("video", i): {"tag_seconds": {10: 100.0}, "watched_tag_seconds": None, "tag_categories": {10: "acts"}} for i in (1, 2, 3)}
+    sources = discovery.Sources(catalog=MemoryCatalog(rows, features), spaces=MemorySpaces({}), signals=MemorySignals(), clock=lambda: 1.0)
+    result = discovery.similar(sources, seed_ids=[1], config={"cooldown_days": 0, "contributor_weight": 0, "diversity": 0})
+    by_id = {row["id"]: row for row in result["items"]}
+    assert by_id[3]["animated_image"] is True
+    assert "animated_image" not in by_id[2]

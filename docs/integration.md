@@ -311,6 +311,7 @@ Each item row has:
 | `media_url` | `str` | Where the client plays it. |
 | `preview_url` | `str`, optional | A short silent clip that grid cards (Home, Search, Similar) play as the hover preview instead of `media_url`. |
 | `open_url` | `str`, optional | The host's own page for the item. Clicking a grid card's media opens it in the same tab, as a real link, instead of the inline player. |
+| `animated_image` | `bool`, optional | Keep only when exactly `true`. The media is an animated image (GIF or similar), so cards, Feed and the Similar seed render it as an `<img>` that plays natively, never a player: no duration, no watch capture. |
 | `tags` | `list[str]` | Display strings. |
 | `contributor_ids` | `list[str]` | Trusted contributor ids; these, not display names, drive affinity. |
 | `updated` | opaque token | May move on any metadata touch. Not part of ranking identity. |
