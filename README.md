@@ -288,6 +288,8 @@ names and types, the attribution rules, and a synthetic capture example.
 
 ## Limits (v0.x)
 
+- 0.8.0: per-category weighting moved to category_weights={name: multiplier}; the default is neutral.
+
 - The slot contracts are proven against the filesystem source only and may
   change before 1.0.
 - Search needs window rows with real timestamps (sidecar `segments` or a timed

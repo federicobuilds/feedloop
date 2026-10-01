@@ -18,7 +18,8 @@ from feedloop import catalog as catalog_module
 from feedloop.profiles import (D_ABANDON_RATIO, D_FINISHED_RATIO, SECONDARY_EVENT_VEC_WEIGHT, rocchio_over,
                                verdict, watch_rows)
 from feedloop.ranking import (admit_sources, cosine, embedding_similarity, face_overlap, mean_seed_vectors, page_items,
-                              parse_context, seed_query, select, share_vector, similar_components)
+                              parse_context, resolve_category_weights, seed_query, select, share_vector,
+                              similar_components)
 from feedloop.slots import DEFAULT_SPACE_ROLES, MissingKeys
 from feedloop.taste import DEFAULT_KINDS, chunked_dot, eligible_ranked_items, item_preferences
 
@@ -34,7 +35,6 @@ SIMILAR_REVISION = "similar/v1"
 D_SEED_TAGS = 20
 D_POOL_PER_TAG = 400
 D_SIMILAR_POOL = 500
-D_BODYPARTS_WEIGHT = 0.3
 D_MAX_TAG_SHARE = 0.35
 D_EMBED_WEIGHT = 0.5
 D_SEM_SHARE = 0.5
@@ -389,7 +389,7 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
                                     resolve_eligibility=resolve_eligibility, kinds=sources.kinds)
     seed_tag_limit = int(cfg.get("seed_tag_limit", D_SEED_TAGS))
     pool_size = int(cfg.get("candidate_pool", D_SIMILAR_POOL))
-    bodyparts_weight = float(cfg.get("bodyparts_weight", D_BODYPARTS_WEIGHT))
+    category_weights = resolve_category_weights(cfg)
     max_tag_share = float(cfg.get("max_tag_share", D_MAX_TAG_SHARE))
     embed_weight = float(cfg.get("embed_weight", D_EMBED_WEIGHT))
     sem_share = float(cfg.get("semantic_share", D_SEM_SHARE))
@@ -412,7 +412,7 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
             revisions["watch"] = sources.signals.read()["observed_at"]
         except Exception:
             revisions["watch"] = None
-    generating_config = dict(seed_tag_limit=seed_tag_limit, candidate_pool=pool_size, bodyparts_weight=bodyparts_weight,
+    generating_config = dict(seed_tag_limit=seed_tag_limit, candidate_pool=pool_size, category_weights=category_weights,
                              max_tag_share=max_tag_share, embed_weight=embed_weight, semantic_share=sem_share,
                              audio_weight=audio_weight, mix_weight=mix_weight, contributor_weight=face_weight,
                              cooldown_days=cooldown_days, recovery_days=recovery_days, diversity=diversity)
@@ -447,7 +447,7 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
     for tag in intent_tags:
         merged[int(tag)] += 60.0
     idf = {t: idf_of(t) for t in merged}
-    seed_vec = share_vector(merged, seed_duration, idf, cats, bodyparts_weight=bodyparts_weight, max_tag_share=max_tag_share)
+    seed_vec = share_vector(merged, seed_duration, idf, cats, category_weights=category_weights, max_tag_share=max_tag_share)
     look_share = max(0.0, 1.0 - audio_weight - mix_weight)
     active_models = {roles["visual"]: (1 - sem_share) * look_share, roles["semantic"]: sem_share * look_share,
                      roles["voice"]: audio_weight, roles["sound"]: mix_weight}
@@ -475,7 +475,7 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
             for secs, key in rows:
                 cand_vecs[key][tag] = secs
     rough = sorted(cand_vecs.items(), key=lambda kv: (-sum(min(s, 600.0) * idf.get(t, 1.0) *
-                   (bodyparts_weight if cats.get(t) == "bodyparts" else 1.0) for t, s in kv[1].items()), kv[0]))[:pool_size]
+                   category_weights.get(cats.get(t), 1.0) for t, s in kv[1].items()), kv[0]))[:pool_size]
     source_orders = {"tags": [key for key, _ in rough]}
     vector_budget = max(40, pool_size // 4)
     if seed_embed and allowed_set != set():
@@ -531,7 +531,7 @@ def similar(sources: Sources, *, context=None, seed_ids=(), config=None, offset=
         if not pool_rows.get(key):
             continue
         cvec = share_vector(coverage.get(key, {}), durations.get(key, 0.0), idf, cats,
-                            bodyparts_weight=bodyparts_weight, max_tag_share=max_tag_share)
+                            category_weights=category_weights, max_tag_share=max_tag_share)
         contributions = []
         tag_sim = cosine(seed_vec, cvec, contributions=contributions)
         emb_sim = None

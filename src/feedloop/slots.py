@@ -28,6 +28,7 @@ is constructed with (``read_current``/``apply_change``), never through a slot.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 import numpy as np
@@ -86,7 +87,15 @@ class Signals(Protocol):
     A row: ``rating`` (0-100 or None), ``engagement_count`` (int >= 0), and, only
     when the item was actually watched, ``watch = {"watched_s", "last_at",
     "visit_days": [utc_day_int, ...], "intervals": [(start, end), ...]}``.
-    No watch history means no ``watch`` key, never a zero-second visit."""
+    No watch history means no ``watch`` key, never a zero-second visit.
+
+    Each row should also carry ``updated_at``: the epoch seconds of that item's last
+    rating, engagement or watch change, never later than ``observed_at``. The tuner
+    judges a past trial from current rows, so it needs to know which rows changed
+    after the trial's evidence cutoff. When any returned row lacks ``updated_at`` the
+    whole read falls back to the global ``observed_at`` as the cutoff: while the host
+    keeps writing, ``observed_at`` stays newer than every cutoff and tuner evidence is
+    unavailable. ``check_signals`` reports rows that break this contract."""
 
     def read(self, keys: Sequence[ItemKey] | None = None) -> Mapping[str, Any]:
         """Current authoritative rows and their observation time. ``None`` reads every row."""
@@ -149,8 +158,31 @@ def parse_wire_key(value: str, kinds) -> ItemKey:
     return item_key(kind, int(rest), kinds)
 
 
+def check_signals(signals: Signals, keys: Sequence[ItemKey] | None = None) -> list[str]:
+    """Conformance problems in one ``signals.read(keys)``; an empty list means it conforms."""
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value)
+    current = signals.read(keys)
+    observed_at = current.get("observed_at")
+    problems = [] if finite(observed_at) else ["observed_at is not a finite number"]
+    for key, row in sorted(current.get("rows", {}).items()):
+        name = wire_key(key)
+        if "updated_at" not in row:
+            problems.append(f"{name}: missing updated_at")
+        elif not finite(row["updated_at"]):
+            problems.append(f"{name}: updated_at is not a finite number")
+        elif finite(observed_at) and row["updated_at"] > observed_at:
+            problems.append(f"{name}: updated_at is after observed_at")
+        watch = row.get("watch") or {}
+        values = {"rating": row.get("rating"), "engagement_count": row.get("engagement_count"),
+                  "watch.watched_s": watch.get("watched_s"), "watch.last_at": watch.get("last_at")}
+        problems += [f"{name}: {field} is not finite" for field, value in values.items()
+                     if value is not None and not finite(value)]
+    return problems
+
+
 __all__ = [
     "ItemKey", "DEFAULT_SPACE_ROLES", "TransportError", "AuthorityError", "ResponseError", "MissingKeys",
     "Catalog", "Signals", "FeatureSpaces", "TextEncoder", "IdentityLinks", "Annotator",
-    "item_key", "wire_key", "parse_wire_key",
+    "item_key", "wire_key", "parse_wire_key", "check_signals",
 ]

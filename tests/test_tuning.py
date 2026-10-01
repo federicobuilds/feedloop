@@ -28,7 +28,7 @@ def rows(tuner, sql):
 
 
 def decision_summary(base_reward, cand_reward, *, sessions=20, per_session=4, base_categories=("acts",),
-                     cand_categories=("acts", "other", "bodyparts")):
+                     cand_categories=("acts", "other", "featured")):
     trials, grouped = [], {}
     for s in range(sessions):
         for i in range(per_session):
@@ -100,7 +100,7 @@ def test_decision_waits_stalls_promotes_and_vetoes_on_entropy():
     action, detail = decide(decision_summary(noisy(.2), noisy(.5)), now=2000000.0, window_started=1990000.0)
     assert (action, detail["winner"]) == ("promote", "cand")
     assert abs(detail["z"]) >= tuning.TUNER_Z
-    action, detail = decide(decision_summary(noisy(.2), noisy(.5), base_categories=("acts", "other", "bodyparts"),
+    action, detail = decide(decision_summary(noisy(.2), noisy(.5), base_categories=("acts", "other", "featured"),
                                              cand_categories=("acts",)), now=2000000.0, window_started=1990000.0)
     assert (action, detail.get("reason")) == ("stall", "entropy_veto")
     assert detail["winner_blocked"] == "cand"
@@ -668,7 +668,7 @@ def test_store_revision_advances_on_every_committed_change_and_tolerates_legacy_
 
 @pytest.mark.parametrize("base_reward, cand_reward, winner", [(0.0, 1.0, "cand"), (1.0, 0.0, "base")])
 def test_zero_variance_arms_with_distinct_means_are_significant(base_reward, cand_reward, winner):
-    mix = ("acts", "other", "bodyparts")
+    mix = ("acts", "other", "featured")
     summary = decision_summary(lambda s, i: base_reward, lambda s, i: cand_reward, sessions=8, per_session=8,
                                base_categories=mix, cand_categories=mix)
     action, detail = decide(summary, now=2000000.0, window_started=1990000.0)

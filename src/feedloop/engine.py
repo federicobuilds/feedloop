@@ -33,7 +33,7 @@ VIEW_WINDOW_DAYS = 14
 DEFAULT_CONFIG = dict(
     half_life_days=21.0, min_watch_seconds=20.0, finished_ratio=0.45, abandon_ratio=0.15,
     dislike_min_watch_seconds=60.0, short_watch_ratio=0.5, history_limit=600, rating_strength=1.0,
-    dislike_strength=1.0, profile_tags=24, candidate_pool=600, bodyparts_weight=0.3, max_tag_share=0.35,
+    dislike_strength=1.0, profile_tags=24, candidate_pool=600, category_weights={}, max_tag_share=0.35,
     length_floor_seconds=120.0, diversity=0.7, calibration=0.25, cooldown_days=45.0, recovery_days=120.0,
     impression_discount=0.95, image_events_enabled=True, include_images=False, images_share=0.2,
     explore_slots=2, control_rate=1.0,
@@ -454,7 +454,7 @@ class Engine:
             explanation = dict(row["explanation"])
             explanation["source_rank"] = explanation.get("position", position)
             explanation["position"] = position
-            category = (ranking.dominant_category(vectors.get(key, {}), categories, weights, config["bodyparts_weight"])
+            category = (ranking.dominant_category(vectors.get(key, {}), categories, weights, config["category_weights"])
                         if key[0] == self.primary else key[0])
             explanation["dominant_category"] = category
             # 2026-09-29: explanation only, for the Home shelves; read from rows this call already holds
