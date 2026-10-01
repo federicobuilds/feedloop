@@ -1077,15 +1077,26 @@ def _decoded(db_path, token):
 
 
 def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
-                  experiment_id: str | None = None, include_eligibility_snapshots=False) -> dict[str, Any]:
+                  experiment_id: str | None = None, experiment: Mapping[str, Any] | None = None,
+                  include_eligibility_snapshots=False) -> dict[str, Any]:
     """Read-only. The decoded config, arms and payload objects are shared between reads of one
-    ledger generation, so callers must not mutate them."""
+    ledger generation, so callers must not mutate them.
+
+    experiment {knob, base, candidate} selects every request whose stamped config.experiment
+    carries that arm state, whatever context its experiment_id hashes. Unresolved feedback and
+    quarantined watch captures only count against the selected views they are linked to
+    (view_blockers); unlinked records are reported in excluded_diagnostics, never as reasons."""
     _number(since_ts)
     _number(through_ts)
     _require(since_ts <= through_ts, "invalid_window")
     _require(type(include_eligibility_snapshots) is bool, "invalid_snapshot_export")
     if experiment_id is not None:
         _text(experiment_id)
+    if experiment is not None:
+        _keys(experiment, {"knob", "base", "candidate"})
+        _text(experiment["knob"])
+        _number(experiment["base"])
+        _number(experiment["candidate"])
     decoded_requests, decoded_events = _decoded(db_path, generation(db_path))
     try:
         with _connection(db_path) as conn:
@@ -1110,10 +1121,13 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
             watch_quarantined_views = {r[0] for r in conn.execute("""SELECT json_extract(s.payload_json,'$.viewed_event_id')
                 FROM rec_watch_steps s JOIN rec_watch_capture_imports i ON s.source_id=i.source_id AND s.capture_id=i.capture_id
                 WHERE s.status='quarantined' AND i.imported_at<=?""", (through_ts,))}
-            unresolved = conn.execute("""SELECT count(*) FROM feedback_operations o JOIN feedback_steps s
+            unresolved = [dict(r) for r in conn.execute("""SELECT o.kind,o.item_id,
+                json_extract(o.operation_json,'$.request_id') AS request_id,
+                json_extract(o.operation_json,'$.viewed_event_id') AS viewed_event_id
+                FROM feedback_operations o JOIN feedback_steps s
                 ON s.step_id=(SELECT max(step_id) FROM feedback_steps WHERE operation_id=o.operation_id AND ts<=?)
                 WHERE o.created_at<=? AND s.state NOT IN ('confirmed','conflict')""",
-                (through_ts, through_ts)).fetchone()[0]
+                (through_ts, through_ts))]
             sync_unresolved = conn.execute("""SELECT count(*) FROM rec_sync_captures c WHERE c.received_at<=?
                 AND NOT EXISTS(SELECT 1 FROM rec_sync_results r WHERE r.capture_id=c.capture_id AND r.completed_at<=?)""",
                 (through_ts, through_ts)).fetchone()[0]
@@ -1135,9 +1149,17 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
                 hit = decoded_events[event["event_id"]] = (raw, json.loads(raw))
             event["payload"] = hit[1]
             event["identity_valid"] = _mapping_valid(event, mappings)
+        for row in (*requests.values(), *events):
+            row["identity_reason"] = (None if row["identity_valid"] else "session_mapping_changed"
+                                      if row["canonical_session_id"] and _resolve_session(row["session_id"], mappings)[0]
+                                      else "session_mapping_missing")
         by_id = {r["event_id"]: r for r in events}
-        selected = {r["event_id"] for r in events if r["occurred_at"] >= since_ts and
-                    (experiment_id is None or requests.get(r["request_id"], {}).get("experiment_id") == experiment_id)}
+
+        def in_cohort(req):
+            stamped = (req.get("config") or {}).get("experiment") or {}
+            return ((experiment_id is None or req.get("experiment_id") == experiment_id) and
+                    (experiment is None or all(stamped.get(k) == experiment[k] for k in ("knob", "base", "candidate"))))
+        selected = {r["event_id"] for r in events if r["occurred_at"] >= since_ts and in_cohort(requests.get(r["request_id"], {}))}
         selected_views = {eid for eid in selected if by_id[eid]["event_type"] == "viewed"}
         cohort_items = {(by_id[eid]["canonical_session_id"] or by_id[eid]["session_id"], by_id[eid]["kind"], by_id[eid]["item_id"]) for eid in selected_views}
         selected.update(r["event_id"] for r in events if r["event_type"] == "outcome" and r["occurred_at"] >= since_ts
@@ -1183,16 +1205,22 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
                 owner, reason = _outcome_owner(row, by_id, claim_map, mappings, runs[-1]["window_s"])
                 reason = reason or "attribution_pending"
                 provisional.append({"outcome_id": row["event_id"], "reason": reason})
-                if reason not in ("outside_attribution_window", "pre_exposure_watch") and reason not in reasons:
-                    reasons.append(reason)
-        if unresolved:
-            reasons.append("feedback_unresolved")
+        # 2026-10-01: unresolved feedback, unresolved outcomes and quarantined captures taint only the
+        # trials they are linked to; summarize_trials excludes those trials and reports the rest.
+        view_blockers, excluded = {}, {}
+        for op in unresolved:
+            linked = [eid for eid in selected_views if eid == op["viewed_event_id"] or by_id[eid]["request_id"] == op["request_id"]
+                      or (by_id[eid]["kind"], by_id[eid]["item_id"]) == (op["kind"], op["item_id"])]
+            for eid in linked:
+                view_blockers.setdefault(eid, []).append("feedback_unresolved")
+            if not linked:
+                excluded["feedback_unresolved"] = excluded.get("feedback_unresolved", 0) + 1
         if sync_unresolved:
             reasons.append("sync_capture_unresolved")
         if sync_gap:
             reasons.append("sync_capture_gap")
-        if watch_quarantined_views & selected_views:
-            reasons.append("watch_capture_quarantined")
+        for eid in watch_quarantined_views & selected_views:
+            view_blockers.setdefault(eid, []).append("watch_capture_quarantined")
         sessions = {}
         viewed_ids = [r["event_id"] for r in events if r["event_id"] in selected_views]
         for eid in viewed_ids:
@@ -1204,7 +1232,7 @@ def read_evidence(db_path: str, *, since_ts: float, through_ts: float,
                 "watch_capture_supported": bool(captured_outcomes), "watch_capture_receipts": watch_receipts,
                 "source_completeness": {"views": "unavailable", "outcomes": "unavailable"},
                 "sync_capture": {"results": sync_results, "unresolved": sync_unresolved, "deployment_verified": False},
-                "provisional": provisional,
+                "provisional": provisional, "view_blockers": view_blockers, "excluded_diagnostics": excluded,
                 "metadata": meta, "since_ts": since_ts, "through_ts": through_ts,
                 "requests": [r for k, r in requests.items() if k in request_ids],
                 "events": kept, "attributions": claims, "sessions": sessions, "viewed_ids": viewed_ids,
@@ -1314,12 +1342,18 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
     facts never fall back to a delta-based verdict or current profile. Corrections
     are folded before the ONE shared trial_reward call per exposure. Old explicit
     floors are excluded by passing only fresh rating/O inputs to that same function.
+
+    A trial with its own validity reasons is excluded (excluded_trials, excluded counts) and
+    never taints the others; trials and sessions hold only evaluable trials. Evidence-level
+    reasons still invalidate the whole summary. Blockers and unresolved outcomes linked to no
+    eligible trial are counted in excluded_diagnostics.
     """
     reasons = list(evidence["validity_reasons"])
+    diagnostics = dict(evidence.get("excluded_diagnostics", {}))
     result = {"status": evidence["status"], "valid": False, "validity_reasons": reasons,
               "promotion_enabled": False, "watch_capture_supported": False,
               "promotion_reasons": list(evidence.get("promotion_reasons", ["watch_capture_unavailable"])),
-              "trials": [], "sessions": {}}
+              "trials": [], "sessions": {}, "excluded_trials": [], "excluded": {}, "excluded_diagnostics": diagnostics}
     run = evidence.get("attribution_run")
     if evidence["status"] != "ok" or not run:
         return result
@@ -1336,6 +1370,8 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
     for claim in evidence["attributions"]:
         grouped.setdefault(claim["viewed_id"], []).append(events[claim["outcome_id"]])
     selected_views = set(evidence["viewed_ids"])
+    view_blockers = evidence.get("view_blockers", {})
+    linked_views, linked_pending = set(), set()
     for event in evidence["events"]:
         if event["event_id"] not in selected_views:
             continue
@@ -1373,8 +1409,15 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
         facts = cumulative.get((event["kind"], event["item_id"]))
         liked = disliked = reward = None
         trial_reasons = []
-        if not event["identity_valid"] or not served["identity_valid"] or not req["identity_valid"] or any(not r["identity_valid"] for r in rows):
-            trial_reasons.append("session_mapping_changed")
+        for row in (event, served, req, *rows):
+            if not row["identity_valid"]:
+                reason = row.get("identity_reason") or "session_mapping_changed"
+                if reason not in trial_reasons:
+                    trial_reasons.append(reason)
+        linked_views.add(event["event_id"])
+        for reason in view_blockers.get(event["event_id"], []):
+            if reason not in trial_reasons:
+                trial_reasons.append(reason)
         if pending_corrections:
             trial_reasons.append("correction_pending")
         for pending in evidence["provisional"]:
@@ -1385,9 +1428,10 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
             if original["parent_id"] not in (None, event["event_id"], served["event_id"]):
                 continue
             if (_same_session(original, event) and all(original[k] == event[k] for k in ("kind", "item_id"))
-                    and event["occurred_at"] <= original["occurred_at"] <= event["occurred_at"] + run["window_s"]
-                    and pending["reason"] not in trial_reasons):
-                trial_reasons.append(pending["reason"])
+                    and event["occurred_at"] <= original["occurred_at"] <= event["occurred_at"] + run["window_s"]):
+                linked_pending.add(pending["outcome_id"])
+                if pending["reason"] not in trial_reasons:
+                    trial_reasons.append(pending["reason"])
         if facts is None:
             trial_reasons.append("cumulative_verdict_unavailable")
         else:
@@ -1400,16 +1444,23 @@ def summarize_trials(evidence: Mapping[str, Any], *, verdict: Callable,
         if not trial_reasons:
             reward = trial_reward(watched, rating=rating, engagement_count=engagement_count) if liked else 0.0
             _require(type(reward) in (int, float) and math.isfinite(reward) and 0 <= reward <= 1, "invalid_shared_reward")
-        for reason in trial_reasons:
-            if reason not in reasons:
-                reasons.append(reason)
         trial = {"viewed_id": event["event_id"], "session_id": event["session_id"], "request_id": event["request_id"],
                  "experiment_id": req["experiment_id"], "kind": event["kind"], "item_id": event["item_id"],
                  "arm": p["arm"], "reward": reward, "watched_s_delta": watched,
                  "liked": liked, "disliked": disliked, "category": p["category"],
                  "canonical_session_id": event["canonical_session_id"], "validity_reasons": trial_reasons}
+        if trial_reasons:
+            result["excluded_trials"].append(trial)
+            for reason in trial_reasons:
+                result["excluded"][reason] = result["excluded"].get(reason, 0) + 1
+            continue
         result["trials"].append(trial)
         result["sessions"].setdefault(event["canonical_session_id"] or event["session_id"], []).append(trial)
+    unlinked = [reason for eid, codes in view_blockers.items() if eid not in linked_views for reason in codes]
+    unlinked += [p["reason"] for p in evidence["provisional"] if p["outcome_id"] not in linked_pending
+                 and p["reason"] not in ("outside_attribution_window", "pre_exposure_watch")]
+    for reason in unlinked:
+        diagnostics[reason] = diagnostics.get(reason, 0) + 1
     if not result["trials"]:
         reasons.append("no_eligible_trials")
     result["valid"] = not reasons

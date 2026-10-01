@@ -145,7 +145,8 @@ def test_tick_is_ripened_gated_and_routes_each_decision(tmp_path, monkeypatch):
         tuner.clock = lambda: 2000000.0
         result = tuner.tick()
         assert result["action"] == action
-        tuner.read_evidence.assert_called_once_with(tuner.ledger_path, since_ts=1900000.0, through_ts=2000000.0 - tuning.TUNER_RIPEN_S)
+        tuner.read_evidence.assert_called_once_with(tuner.ledger_path, since_ts=1900000.0, through_ts=2000000.0 - tuning.TUNER_RIPEN_S,
+                                                       experiment={"knob": "embedding_weight", "base": .35, "candidate": .4})
         facts.assert_called_once_with({("video", 4)}, evidence["through_ts"])
         for name in calls:
             assert calls[name].called == (name == target), name
