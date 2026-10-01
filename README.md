@@ -107,15 +107,18 @@ and works offline. It calls only the server's public routes (`/api/feed`,
   one metadata line. Like and Dislike are toggles; pressing an active one
   clears the rating, with Undo next to the confirmation. A More disclosure
   holds Clear rating and Count engagement, each explained in one line. Next
-  moves on; More like this opens Similar. Move with the arrow keys or J and
+  moves on; More like this opens Similar. An image cell shows a visible View
+  chip that opens the full-size viewer. Move with the arrow keys or J and
   K, rate with L and D. Space or a tap pauses, and a video that scrolls out of
   view pauses.
 - Home: horizontal shelves named for why their picks were chosen: Continue watching, Because you watched <title>,
   Because you like <tag>, Something new, New to you, and category shelves
   otherwise. Each shelf shows item counts, Load more, and a skeleton while
   loading. Hovering a card plays a
-  muted preview after a short delay. Clicking it turns the card into the
-  player. Only that player counts as watching; the preview does not. A
+  muted preview after a short delay. Clicking a video card turns it into the
+  player. An image card shows a View chip instead of Play and opens the
+  full-size viewer on click, or the host page when `open_url` is set. Only
+  that player counts as watching; the preview does not. A
   catalog item may carry `preview_url` (a short silent clip the hover
   preview plays instead) and `open_url` (the host's own page, which a card
   click opens instead of the inline player). A catalog item may carry
@@ -226,8 +229,13 @@ history as of a known time), `FeatureSpaces` (mean vectors per item, optionally
 timed window rows), `TextEncoder` (text to a vector in a named space),
 `IdentityLinks` (trusted shared-contributor links, optional) and `Annotator`
 (tag writes, optional and never called on a read path). Ratings and engagement
-change only through two callbacks the Engine is constructed with. The
-filesystem source fills the first three and supplies the callbacks:
+change only through two callbacks the Engine is constructed with. Each
+`Signals.read` row carries `updated_at`, the epoch seconds of that item's last
+rating, engagement or watch change; the tuner dates a row's evidence from it
+rather than from the global `observed_at`, so a host that keeps writing cannot
+make the whole history look new. `feedloop.slots.check_signals(signals)`
+returns the contract problems for a read (missing or late `updated_at`,
+non-finite numbers). The filesystem source fills the first three and supplies the callbacks:
 
 ```python
 import time
@@ -265,10 +273,15 @@ actions on that item and offers Check status, which reconciles against the
 ledger and keeps the receipt so Undo still works.
 
 The tuner runs one experiment at a time, base against candidate for one knob.
-Once each arm has enough ripened trials across enough sessions, and the
-difference is significant and does not collapse category diversity, it promotes
-the winner by itself and rotates to the next knob. Every move is a ledger row
-that the Engine page can revert; reset restores the standard values.
+It judges only the active experiment's cohort: a record that links to a trial
+but cannot be resolved excludes that trial alone, and records linked to no
+cohort trial never block. Once each trial is past its evidence cutoff and the
+arms have enough ripened trials across enough sessions, and the difference is
+significant and does not collapse category diversity, it promotes the winner by
+itself and rotates to the next knob. The scorecard reports recorded, evaluable
+and excluded trial counts per arm; only trials past the ripe cutoff are
+evaluable. Every move is a ledger row that the Engine page can revert; reset
+restores the standard values.
 
 A host with its own profile and candidate builder passes `prepare_feed` to the
 Engine. It receives the frozen request context, the resolved configuration, the
@@ -284,6 +297,13 @@ A page carries a cursor bound to its ranking generation. When the generation is
 gone (a restart, changed features, a changed catalog) the server refuses the
 cursor, and the client restarts once from the top, keeps its cards and drops
 duplicates. Repeated refusals become a Retry, never a loop.
+
+Every fresh open of the Feed builds a new generation and draws its selection
+with a seeded sample among the top-ranked picks, so two opens differ yet each
+page is reproducible from its seed. A retry and Load more keep the generation
+they started with. A served item that never earns a qualified view drifts down
+as a capped fatigue in later pages, sharing one cap with the impression
+discount.
 
 ## Integration
 

@@ -310,7 +310,7 @@ Each item row has:
 | `duration_s` | `float` | Seconds. `0` or less means unknown. |
 | `media_url` | `str` | Where the client plays it. |
 | `preview_url` | `str`, optional | A short silent clip that grid cards (Home, Search, Similar) play as the hover preview instead of `media_url`. |
-| `open_url` | `str`, optional | The host's own page for the item. Clicking a grid card's media opens it in the same tab, as a real link, instead of the inline player. |
+| `open_url` | `str`, optional | The host's own page for the item. Clicking a grid card's media opens it in the same tab, as a real link, instead of the inline player. Image and animated cards show a View chip and video cards a Play chip; the chip follows the same link. |
 | `animated_image` | `bool`, optional | Keep only when exactly `true`. The media is an animated image (GIF or similar), so cards, Feed and the Similar seed render it as an `<img>` that plays natively, never a player: no duration, no watch capture. |
 | `tags` | `list[str]` | Display strings. |
 | `contributor_ids` | `list[str]` | Trusted contributor ids; these, not display names, drive affinity. |
@@ -371,6 +371,12 @@ agrees; a set that keeps changing is an error. The `updated` token and
 `change_token` are deliberately excluded, so a rating or a view does not
 change the ranking identity. Duplicate groups are derived from the file
 fingerprints, so the same file listed twice is served once.
+
+Each fresh page is a new ranking generation. Selection samples with a seeded
+random draw among the top-ranked candidates, so a page is reproducible from its
+seed and two fresh opens of the Feed differ; a cursor retry and Load more keep
+their generation. A served item with no qualified view drifts down as a capped
+fatigue in later pages.
 
 ## Reference implementation
 
