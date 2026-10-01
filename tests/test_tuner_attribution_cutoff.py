@@ -12,7 +12,9 @@ def test_tick_uses_completed_run_when_clock_falls_between_attribution_runs(tmp_p
     db = str(tmp_path / "events.sqlite")
     ledger.initialize_event_store(db, cutover_ts=95.0)
     ledger.record_session_mapping(db, alias_session_id="session-1", canonical_session_id="session-1", mapping_revision="initial")
-    served = ledger.record_served(db, request=request(), items=[item()])[("video", 1)]
+    req = request()
+    req["config"] = {**req["config"], "experiment": {"id": "experiment-1", "knob": "embedding_weight", "base": .35, "candidate": .4}}
+    served = ledger.record_served(db, request=req, items=[item()])[("video", 1)]
     viewed = ledger.record_event(db, event=view(served))
     ledger.record_event(db, event=outcome(parent=viewed))
     ledger.advance_attribution(db, now=5000.0)

@@ -628,6 +628,7 @@ class TestDashboardSharedContracts:
         card = eng.scorecard()
         assert card["tuner"]["promotion_eligible"] is True
         assert card["evidence"]["promotion_reasons"] == ["watch_capture_unavailable"]
+        assert card["evidence"]["ripe_through_ts"] == NOW - 7 * 3600.0
         assert eng.tuner.tick(now=NOW)["action"] == "promote"
         eng.tuner.summarize_trials = Mock(return_value=summary(0.0))
         assert eng.scorecard()["tuner"]["promotion_eligible"] is False
@@ -635,12 +636,27 @@ class TestDashboardSharedContracts:
         # the winning trials sit inside the ripen window: the page shows them but is not eligible
         ripe_boundary = NOW - tuning.TUNER_RIPEN_S
         evidence = eng.tuner.read_evidence.return_value
-        eng.tuner.read_evidence = Mock(side_effect=lambda _path, *, since_ts, through_ts: {**evidence, "through_ts": through_ts})
+        eng.tuner.read_evidence = Mock(side_effect=lambda _path, *, since_ts, through_ts, experiment=None: {**evidence, "through_ts": through_ts})
         eng.tuner.summarize_trials = Mock(side_effect=lambda ev, **_: summary(.3 if ev["through_ts"] > ripe_boundary else 0.0))
         card = eng.scorecard()
         assert card["tuner"]["promotion_eligible"] is False
         assert card["evidence"]["through_ts"] > ripe_boundary, "displayed trials still use the current evidence"
         assert eng.tuner.tick(now=NOW)["action"] != "promote"
+
+    def test_scorecard_arm_counts_split_recorded_evaluable_and_excluded(self, tmp_path, clock):
+        eng = make_engine(tmp_path, clock[1])
+        eng.tuner.read_evidence = Mock(return_value={"status": "ok", "valid": True, "validity_reasons": [], "promotion_reasons": []})
+        trial = {"arm": "base", "reward": .5, "liked": True, "validity_reasons": []}
+        excluded = {"arm": "base", "reward": None, "liked": None, "validity_reasons": ["cumulative_verdict_unavailable"]}
+        eng.tuner.summarize_trials = Mock(return_value={"status": "ok", "valid": True, "validity_reasons": [], "promotion_reasons": [],
+                                                        "trials": [trial, {**trial, "liked": False, "reward": 0.0}],
+                                                        "excluded_trials": [excluded]})
+        card = eng.scorecard()
+        assert card["tuner"]["arms"]["base"] == {"trials": 2, "successes": 1, "mean_reward": .25, "like_rate": .5,
+                                                 "recorded": 3, "evaluable": 2, "liked_evaluable": 1,
+                                                 "excluded": {"count": 1, "reasons": {"cumulative_verdict_unavailable": 1}}}
+        assert card["tuner"]["arms"]["cand"]["recorded"] == 0 and len(card["trials"]) == 3
+        assert eng.tuner.read_evidence.call_args.kwargs["experiment"]["knob"] == card["tuner"]["knob"]
 
     def test_scorecard_uses_actual_active_knob_and_missing_evidence_disables_promotion(self, tmp_path, clock):
         eng = make_engine(tmp_path, clock[1])

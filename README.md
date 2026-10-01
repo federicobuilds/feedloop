@@ -291,6 +291,7 @@ names and types, the attribution rules, and a synthetic capture example.
 
 ## Limits (v0.x)
 
+- 0.8.2: tuner evidence is scoped to the active experiment's cohort; a trial-level problem excludes that trial only, unlinked records are diagnostics, and the scorecard shows recorded, evaluable and excluded counts per arm.
 - 0.8.1: optional preview_url and open_url on catalog items for grid-card previews and links.
 - 0.8.0: per-category weighting moved to category_weights={name: multiplier}; the default is neutral.
 

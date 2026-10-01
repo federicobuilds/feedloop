@@ -147,6 +147,18 @@ policy `production-explicit-w3600-v1`). A correction replaces the original
 outcome in attribution. When any link is missing the outcome stays in the
 ledger but earns nothing; `read_evidence` reports the reason.
 
+The tuner judges only the active experiment's cohort: `read_evidence(...,
+experiment={"knob", "base", "candidate"})` selects the requests whose stamped
+`config.experiment` carries that arm state, whatever context their
+`experiment_id` hashes. Unresolved feedback, quarantined watch captures and
+unattributable outcomes and missing or changed session identity count only against the trials they link to (feedback by
+view, request or item; captures by view; outcomes by session and item inside the
+trial's attribution window); such a trial is excluded
+(`excluded_trials`, `excluded`) and the rest still count. Records linked to no
+cohort trial appear in `excluded_diagnostics` and never block. A session with no
+canonical mapping reports `session_mapping_missing`; a remapped one reports
+`session_mapping_changed`.
+
 ### One synthetic capture example
 
 A user is served item 42, sees it for 1.5 s at 90 percent, then watches 40

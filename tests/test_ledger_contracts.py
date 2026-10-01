@@ -190,7 +190,7 @@ class EventContracts(unittest.TestCase):
         self.record_view(self.serve("middle", "cand")[("video", 1)], key="middle-view", ts=115)
         self.attribute()
         self.assertEqual(self.evidence()["attributions"], [])
-        self.assertIn("source_completeness_unavailable", self.evidence()["validity_reasons"])
+        self.assertIn("source_completeness_unavailable", self.summary(watched=30)["excluded"])
 
     def test_missing_original_cycles_cross_item_and_conflicting_corrections_rejected(self):
         vid = self.record_view()
@@ -216,10 +216,9 @@ class EventContracts(unittest.TestCase):
                 canonical_session_id="canonical-2", mapping_revision="mapping-2")
         self.attribute()
         evidence = self.evidence()
-        self.assertIn("session_mapping_changed", evidence["validity_reasons"])
+        self.assertIn("session_mapping_changed", self.summary(watched=30)["excluded"])
         self.assertEqual([(r["outcome_id"], r["viewed_id"]) for r in evidence["attributions"]], [(original, vid)])
-        old = self.events.read_evidence(self.db, since_ts=95, through_ts=250)
-        self.assertNotIn("session_mapping_changed", old["validity_reasons"])
+        self.assertNotIn("session_mapping_changed", self.summary(watched=30, cutoff=250)["excluded"])
 
     def test_cached_page_cannot_be_relabelled_with_new_experiment(self):
         first = request()
@@ -307,7 +306,7 @@ class EventContracts(unittest.TestCase):
         self.events.attribute_outcomes(self.db, through_ts=250, window_s=100, policy_revision="policy-1")
         self.events.record_event(self.db, event=outcome())
         self.assertEqual(self.attribute(), 0)
-        self.assertIn("source_completeness_unavailable", self.evidence()["validity_reasons"])
+        self.assertIn("source_completeness_unavailable", self.summary(watched=30)["excluded"])
         self.assertEqual(self.events.attribute_outcomes(self.db, through_ts=600, window_s=100,
                                                        policy_revision="policy-1"), 0)
 
@@ -351,21 +350,144 @@ class EventContracts(unittest.TestCase):
         evidence = self.events.read_evidence(self.db, since_ts=95, through_ts=500, experiment_id="experiment-1")
         self.assertNotIn("late_evidence", evidence["validity_reasons"])
 
+    def test_cohort_filter_selects_the_stamped_arm_state_across_experiment_ids(self):
+        stamp = {"knob": "embedding_weight", "base": .35, "candidate": .4}
+        for client, experiment, stamped in (("page-a", "ctx-a", stamp), ("page-b", "ctx-b", stamp),
+                                            ("page-c", "ctx-c", {**stamp, "candidate": .45})):
+            req = request(client, experiment=experiment)
+            req["config"] = {**req["config"], "experiment": {"id": experiment, **stamped}}
+            parent = self.events.record_served(self.db, request=req, items=[item()])[("video", 1)]
+            self.events.record_event(self.db, event=view(parent, key="view-" + client))
+        evidence = self.events.read_evidence(self.db, since_ts=95, through_ts=500, experiment=stamp)
+        self.assertEqual(sorted(r["experiment_id"] for r in evidence["requests"]), ["ctx-a", "ctx-b"])
+        self.assertEqual(len(evidence["viewed_ids"]), 2)
+
     def test_feedback_validity_respects_snapshot_cutoff(self):
         self.record_view()
         self.attribute()
-        op = {"operation_id": "later-feedback", "kind": "image", "item_id": 9,
+        op = {"operation_id": "later-feedback", "kind": "video", "item_id": 1,
               "action": "engagement", "session_id": "session-1"}
         with patch.object(self.events.time, "time", return_value=600):
             self.events.perform_feedback(self.db, operation=op,
                 read_current=lambda _: {"status": "ok", "rating100": None, "engagement_count": 0},
                 apply_change=lambda *_: {"status": "indeterminate"})
-        self.assertNotIn("feedback_unresolved", self.evidence()["validity_reasons"])
+        self.assertEqual(self.evidence()["view_blockers"], {})
         with patch.object(self.events.time, "time", return_value=800):
             self.events.reconcile_feedback(self.db, operation_id="later-feedback",
                 read_current=lambda _: {"status": "ok", "rating100": None, "engagement_count": 1})
         snapshot = self.events.read_evidence(self.db, since_ts=95, through_ts=700)
-        self.assertIn("feedback_unresolved", snapshot["validity_reasons"])
+        self.assertEqual(list(snapshot["view_blockers"].values()), [["feedback_unresolved"]])
+
+    def pending_feedback(self, op_id, kind, item_id):
+        op = {"operation_id": op_id, "kind": kind, "item_id": item_id, "action": "engagement", "session_id": "session-1"}
+        self.events.perform_feedback(self.db, operation=op,
+            read_current=lambda _: {"status": "ok", "rating100": None, "engagement_count": 0},
+            apply_change=lambda *_: {"status": "indeterminate"})
+
+    def two_trials(self):
+        self.record_view()
+        served = self.events.record_served(self.db, request=request("page-2"), items=[item(2, arm="cand")])
+        self.events.record_event(self.db, event=view(served[("video", 2)], key="view-2", item_id=2))
+        self.attribute()
+
+    def two_summary(self, items):
+        evidence = self.events.read_evidence(self.db, since_ts=95, through_ts=500, experiment_id="experiment-1")
+        return self.events.summarize_trials(evidence, verdict=verdict, trial_reward=trial_reward,
+                                            cumulative_at_cutoff={"cutoff_ts": 500, "items": items})
+
+    FACTS = {"watched_s": 300, "duration_s": 600, "rating": None, "engagement_count": 0}
+
+    def test_unrelated_feedback_is_a_diagnostic_and_linked_feedback_excludes_its_trial(self):
+        self.two_trials()
+        self.pending_feedback("unrelated", "image", 9)
+        summary = self.two_summary({("video", 1): self.FACTS, ("video", 2): self.FACTS})
+        self.assertTrue(summary["valid"], summary["validity_reasons"])
+        self.assertEqual(summary["excluded_diagnostics"], {"feedback_unresolved": 1})
+        self.assertEqual(len(summary["trials"]), 2)
+        self.pending_feedback("linked", "video", 2)
+        summary = self.two_summary({("video", 1): self.FACTS, ("video", 2): self.FACTS})
+        self.assertEqual([t["item_id"] for t in summary["trials"]], [1])
+        self.assertEqual(summary["excluded"], {"feedback_unresolved": 1})
+        self.assertTrue(summary["valid"])
+
+    def test_quarantined_capture_only_blocks_its_own_view(self):
+        self.two_trials()
+        view_2 = self.evidence()["viewed_ids"][1]
+        evidence = {**self.evidence(), "view_blockers": {view_2: ["watch_capture_quarantined"], "other-view": ["watch_capture_quarantined"]}}
+        summary = self.events.summarize_trials(evidence, verdict=verdict, trial_reward=trial_reward,
+            cumulative_at_cutoff={"cutoff_ts": 500, "items": {("video", 1): self.FACTS, ("video", 2): self.FACTS}})
+        self.assertTrue(summary["valid"])
+        self.assertEqual(summary["excluded"], {"watch_capture_quarantined": 1})
+        self.assertEqual(summary["excluded_diagnostics"], {"watch_capture_quarantined": 1})
+
+    def test_unrelated_unresolved_correction_does_not_invalidate(self):
+        self.two_trials()
+        original = self.events.record_event(self.db, event=outcome("stray", ts=390, session="other-session", item_id=7))
+        self.events.record_event(self.db, event=outcome("stray-correction", ts=400, session="other-session",
+            corrects=original, item_id=7, payload={"signal": "correction", "provenance": "confirmed_delta_v1"}))
+        self.attribute()
+        summary = self.two_summary({("video", 1): self.FACTS, ("video", 2): self.FACTS})
+        self.assertTrue(summary["valid"], summary["validity_reasons"])
+        self.assertEqual(len(summary["trials"]), 2)
+
+    def test_unmapped_session_excludes_its_own_trial_and_is_a_diagnostic_elsewhere(self):
+        self.two_trials()
+        self.events.record_event(self.db, event=outcome("ghost", ts=300, session="ghost-session", item_id=7))
+        parent = self.events.record_served(self.db, request=request("page-3", session="unmapped"), items=[item(3)])
+        self.events.record_event(self.db, event=view(parent[("video", 3)], key="view-3", session="unmapped", item_id=3))
+        self.attribute()
+        summary = self.events.summarize_trials(self.evidence(), verdict=verdict, trial_reward=trial_reward,
+            cumulative_at_cutoff={"cutoff_ts": 500, "items": {("video", i): self.FACTS for i in (1, 2, 3)}})
+        self.assertTrue(summary["valid"], summary["validity_reasons"])
+        self.assertEqual([t["item_id"] for t in summary["trials"]], [1, 2])
+        self.assertEqual(summary["excluded"], {"session_mapping_missing": 1})
+        self.assertGreaterEqual(summary["excluded_diagnostics"].get("session_mapping_missing", 0), 1)
+
+    def test_pending_outcome_under_another_request_excludes_the_trial_it_reaches(self):
+        self.record_view()
+        other = self.serve("page-2")[("video", 1)]
+        self.events.record_event(self.db, event=outcome(parent=other))
+        self.attribute()
+        summary = self.summary(watched=300)
+        self.assertEqual(summary["trials"], [])
+        self.assertIsNone(summary["excluded_trials"][0]["reward"])
+        self.assertEqual(summary["excluded"], {"explicit_view_missing": 1})
+        self.assertFalse(summary["valid"])
+
+    def test_unlinked_quarantine_is_a_diagnostic(self):
+        self.two_trials()
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("INSERT INTO rec_watch_capture_imports VALUES ('src','cap',100,100,'h','quarantined','test')")
+            conn.execute("INSERT INTO rec_watch_steps(source_id,event_id,capture_id,payload_json,status,stream_session_id,item_id,occurred_at) "
+                         "VALUES ('src','w1','cap',?,'quarantined','stream',9,120)", (json.dumps({"viewed_event_id": "elsewhere"}),))
+            conn.execute("INSERT INTO rec_watch_steps(source_id,event_id,capture_id,payload_json,status,stream_session_id,item_id,occurred_at) "
+                         "VALUES ('src','w2','cap',?,'quarantined','stream',9,130)", (json.dumps({}),))
+        evidence = self.evidence()
+        self.assertEqual(evidence["view_blockers"], {})
+        self.assertEqual(evidence["excluded_diagnostics"], {"watch_capture_quarantined": 2})
+        summary = self.two_summary({("video", 1): self.FACTS, ("video", 2): self.FACTS})
+        self.assertTrue(summary["valid"], summary["validity_reasons"])
+        self.assertEqual(summary["excluded_diagnostics"], {"watch_capture_quarantined": 2})
+
+    def test_missing_cumulative_facts_exclude_only_that_trial(self):
+        self.two_trials()
+        summary = self.two_summary({("video", 1): self.FACTS})
+        self.assertTrue(summary["valid"], summary["validity_reasons"])
+        self.assertEqual([t["item_id"] for t in summary["trials"]], [1])
+        self.assertEqual(summary["excluded"], {"cumulative_verdict_unavailable": 1})
+
+    def test_session_mapping_missing_and_changed_are_distinct(self):
+        self.record_view()
+        other = self.serve("page-2", session="session-2")[("video", 1)]
+        self.events.record_event(self.db, event=view(other, key="view-2", session="session-2"))
+        self.attribute()
+        facts = {("video", 1): self.FACTS}
+        summary = self.two_summary(facts)
+        self.assertEqual(summary["excluded"], {"session_mapping_missing": 1})
+        self.assertEqual([t["session_id"] for t in summary["trials"]], ["session-1"])
+        self.events.record_session_mapping(self.db, alias_session_id="session-1",
+            canonical_session_id="session-9", mapping_revision="merged")
+        self.assertEqual(self.two_summary(facts)["excluded"], {"session_mapping_missing": 1, "session_mapping_changed": 1})
 
     def test_same_timestamp_later_view_does_not_get_prior_outcome(self):
         self.events.record_event(self.db, event=outcome(ts=150, payload={"signal": "engagement", "engagement_delta": 1,
@@ -476,8 +598,8 @@ class EventContracts(unittest.TestCase):
         def forbidden(*args, **kwargs):
             self.fail("missing cumulative inputs must not call shared math")
         summary = self.events.summarize_trials(self.evidence(), verdict=forbidden, trial_reward=forbidden)
-        self.assertIsNone(summary["trials"][0]["reward"])
-        self.assertIn("cumulative_verdict_unavailable", summary["validity_reasons"])
+        self.assertIsNone(summary["excluded_trials"][0]["reward"])
+        self.assertEqual(summary["excluded"], {"cumulative_verdict_unavailable": 1})
         with self.assertRaises(self.events.ContractError):
             self.events.summarize_trials(self.evidence(), verdict=forbidden, trial_reward=forbidden,
                                          cumulative_at_cutoff={"cutoff_ts": 600, "items": {}})
@@ -503,7 +625,7 @@ class EventContracts(unittest.TestCase):
             payload={"signal": "correction", "provenance": "confirmed_delta_v1"}))
         self.attribute()
         self.assertEqual(self.evidence()["attributions"], [])
-        trial = self.summary(watched=3600, engagement_count=5)["trials"][0]
+        trial = self.summary(watched=3600, engagement_count=5)["excluded_trials"][0]
         self.assertIsNone(trial["reward"])
         self.assertIn("original_unresolved", trial["validity_reasons"])
 
@@ -516,7 +638,7 @@ class EventContracts(unittest.TestCase):
             payload={"signal": "correction", "provenance": "unknown"}))
         self.attribute()
         self.assertEqual(len(self.evidence()["attributions"]), 1)
-        self.assertIsNone(self.summary(watched=3600, engagement_count=5)["trials"][0]["reward"])
+        self.assertIsNone(self.summary(watched=3600, engagement_count=5)["excluded_trials"][0]["reward"])
 
     def test_aliases_resolve_before_explicit_attribution_and_cycles_rejected(self):
         self.events.record_session_mapping(self.db, alias_session_id="alias-a",
@@ -538,7 +660,7 @@ class EventContracts(unittest.TestCase):
         vid = self.record_view(parent, session="unresolved")
         self.events.record_event(self.db, event=outcome(parent=vid, session="unresolved"))
         self.assertEqual(self.attribute(), 0)
-        self.assertIn("session_mapping_unresolved", self.evidence()["validity_reasons"])
+        self.assertEqual(self.summary(watched=30)["excluded"], {"session_mapping_missing": 1})
 
     def test_cache_delivery_preserves_original_binding_and_order(self):
         first = request()

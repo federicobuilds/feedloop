@@ -336,17 +336,23 @@ class Tuner:
         self.rotate("promoted", expected_revision=next_revision)
         return True
 
-    def ripe_report(self, window_started, *, now):
+    @staticmethod
+    def cohort(knob, arms):
+        """The arm state the engine stamps on deliveries (config.experiment), which scopes
+        every evidence read to the active experiment's cohort."""
+        return {"knob": knob, "base": float(arms[0]), "candidate": float(arms[1])}
+
+    def ripe_report(self, window_started, *, now, experiment=None):
         """The evidence and trial report tick decides on: read through the ripen boundary,
         or the completed attribution run inside it. The report is None when tick would wait."""
         through = now - TUNER_RIPEN_S
         if through <= window_started:
             return {"status": "window_unripe"}, None
-        evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through)
+        evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through, experiment=experiment)
         completed = evidence.get("attribution_run")
         if completed and window_started < float(completed["through_ts"]) < through:
             through = float(completed["through_ts"])
-            evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through)
+            evidence = self.read_evidence(self.ledger_path, since_ts=window_started, through_ts=through, experiment=experiment)
         if evidence.get("status") != "ok":
             return evidence, None
         viewed = set(evidence.get("viewed_ids") or [])
@@ -365,7 +371,7 @@ class Tuner:
         if not active_knob or not arms:
             return {"action": "disabled"}
         window_started = float(arms[2] or 0.0)
-        evidence, report = self.ripe_report(window_started, now=now)
+        evidence, report = self.ripe_report(window_started, now=now, experiment=self.cohort(active_knob, arms))
         if report is None:
             return {"action": "wait", "reason": evidence.get("status", "unavailable")}
         action, detail = decide(report, now=now, window_started=window_started)

@@ -506,12 +506,13 @@ def build_scorecard(tuner: tuning.Tuner, *, ledger_path, clock=time.time):
     current = arms.get(active, (None, None, None))
     now = clock()
     since = float(current[2] or 0)
-    evidence = tuner.read_evidence(ledger_path, since_ts=since, through_ts=now)
+    cohort = tuner.cohort(active, current) if active and current[0] is not None else None
+    evidence = tuner.read_evidence(ledger_path, since_ts=since, through_ts=now, experiment=cohort)
     completed = evidence.get("attribution_run") if evidence.get("status") == "ok" else None
     cumulative = None
     if completed and since <= float(completed["through_ts"]) <= now:
         through = float(completed["through_ts"])
-        evidence = tuner.read_evidence(ledger_path, since_ts=since, through_ts=through)
+        evidence = tuner.read_evidence(ledger_path, since_ts=since, through_ts=through, experiment=cohort)
         viewed = set(evidence.get("viewed_ids") or [])
         items = {(row["kind"], row["item_id"]) for row in evidence.get("events", []) if row["event_id"] in viewed}
         cumulative = tuner.cumulative_facts(items, evidence["through_ts"])
@@ -525,9 +526,10 @@ def build_scorecard(tuner: tuning.Tuner, *, ledger_path, clock=time.time):
                              if code not in ("automatic_promotion_disabled", "session_evidence_policy_required")]
         # 2026-09-29: eligibility reads evidence exactly as the next tick does (through the ripen
         # boundary), so trials inside the ripen window never make the page eligible.
-        _ripe, report = tuner.ripe_report(since, now=now)
+        ripe, report = tuner.ripe_report(since, now=now, experiment=cohort)
         promotion = report is not None and tuning.decide(report, now=now, window_started=since)[0] == "promote"
     else:
+        ripe = None
         promotion = (evidence.get("valid") is True and evidence.get("promotion_enabled") is True
                      and summary.get("valid") is True and summary.get("promotion_enabled") is True)
     # 2026-09-16: per-trial facts are shown whenever the evidence read succeeded; the
@@ -536,9 +538,17 @@ def build_scorecard(tuner: tuning.Tuner, *, ledger_path, clock=time.time):
     if summary.get("status") == "ok":
         for arm in ("base", "cand"):
             trials = [row for row in summary["trials"] if row["arm"] == arm and row["reward"] is not None]
+            excluded = [row for row in summary.get("excluded_trials", []) if row["arm"] == arm]
+            reasons = {}
+            for row in excluded:
+                for code in row["validity_reasons"]:
+                    reasons[code] = reasons.get(code, 0) + 1
             arm_summary[arm] = {"trials": len(trials), "successes": sum(bool(row["liked"]) for row in trials),
                                 "mean_reward": sum(row["reward"] for row in trials) / len(trials) if trials else None,
-                                "like_rate": sum(bool(row["liked"]) for row in trials) / len(trials) if trials else None}
+                                "like_rate": sum(bool(row["liked"]) for row in trials) / len(trials) if trials else None,
+                                "recorded": len(trials) + len(excluded), "evaluable": len(trials),
+                                "excluded": {"count": len(excluded), "reasons": reasons},
+                                "liked_evaluable": sum(bool(row["liked"]) for row in trials)}
     return {
         "gate": {"min_trials_per_arm": tuning.TUNER_MIN_TRIALS, "ripen_hours": tuning.TUNER_RIPEN_S / 3600.0},
         "capture": ledger.read_capture_readiness(ledger_path),
@@ -547,9 +557,11 @@ def build_scorecard(tuner: tuning.Tuner, *, ledger_path, clock=time.time):
                        "ripen_hours": tuning.TUNER_RIPEN_S / 3600.0},
         "evidence": {"valid": evidence.get("valid") is True and summary.get("valid") is True,
                      "status": evidence.get("status", "unavailable"), "through_ts": evidence.get("through_ts"),
+                     "ripe_through_ts": ripe.get("through_ts") if ripe else None,
+                     "excluded_diagnostics": summary.get("excluded_diagnostics", {}),
                      "validity_reasons": list(dict.fromkeys(evidence.get("validity_reasons", []) + summary.get("validity_reasons", []))),
                      "promotion_reasons": promotion_reasons},
-        "trials": summary.get("trials", []),
+        "trials": summary.get("trials", []) + summary.get("excluded_trials", []),
         "tuner": {"knob": active, "rotation": [e["knob"] for e in tuner.registry], "stalls": state[1] if state else None,
                   "tuned_values": tuned, "default": tuning.knob_default(active) if entry else None,
                   "step": entry["step"] if entry else None, "base": current[0], "candidate": current[1],
