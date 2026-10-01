@@ -56,10 +56,23 @@ def test_client_works_offline_and_keeps_its_hooks():
     for hook in ("data-ai-feed", "data-idx", "data-ai-home-key", "data-ai-home-status", "data-ai-load-more", "data-ai-search-grid",
                  "data-ai-search-status", "ai-search-mode", "data-ai-similar-grid", "data-ai-feedback", "data-ai-undo",
                  "data-ai-ledger", "data-ai-ledger-row", "aid-revert", "aid-tuner-reset", "aid-tick", "data-ai-tuner-error",
-                 "data-ai-capture-status", "data-ai-building", "data-ai-retry", "data-prefix", "data-ai-summary"):
+                 "data-ai-capture-status", "data-ai-building", "data-ai-retry", "data-prefix", "data-ai-summary", "data-ai-jump"):
         assert hook in js, hook
     # the prefixes the search box offers are the ones the engine parses
     assert 'data-prefix="sound:"' in js and 'data-prefix="both:"' in js
+
+
+def test_feed_jump_to_moment_uses_the_served_moment_and_the_player_start():
+    root = web_root()
+    feed, cards, icons = ((root / name).read_text() for name in ("feed.js", "cards.js", "icons.js"))
+    assert "moment:" in icons and 'icon("moment")' in feed
+    jump = feed[feed.index('if (video && typeof item.best_t === "number")'):feed.index("extras.push(jump)")]
+    # only a video with a served moment gets the button, named for the jump it makes
+    assert 'typeof item.best_t === "number"' in jump and 'jump.type = "button"' in jump
+    assert '"aria-label", "Jump to the matching moment at "' in jump
+    # the jump seeks to the player's own start, which openVideo also puts in the source's #t= fragment
+    assert "video.__loadSource()" in jump and "video.currentTime = video.__start" in jump
+    assert 'item.media_url + "#t=" + video.__start' in cards
 
 
 def test_feed_page_carries_the_fields_the_cards_read(ctx):

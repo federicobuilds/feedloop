@@ -460,3 +460,48 @@ def test_watch_receipt_retry_with_a_fresh_received_at_is_a_duplicate(tmp_path, c
     with pytest.raises(ledger.ContractError, match="watch_receipt_conflict"):
         eng.record([{"type": "watch_capture", "batch": {**batch, "received_at": 110.0, "source_revision": "other"}}])
     assert ledger.watch_capture_status(eng.ledger_path, source_id="player", capture_id="cap-1")["status"] == "imported"
+
+
+def _moment_windows(query):
+    """Engine._read_windows over a fake paired look space: item 1 has four windows within the
+    margin of its best and one outside it, item 2 one window, item 3 a runner-up past the margin."""
+    rows = [(1, 0.0, 1.0), (1, 10.0, 0.995), (1, 20.0, 0.985), (1, 30.0, 0.99), (1, 40.0, 0.9),
+            (2, 5.0, 0.8), (3, 1.0, 1.0), (3, 2.0, 0.95)]
+    keys = [("video", sid) for sid, _t, _s in rows]
+    times = np.array([t for _sid, t, _s in rows], dtype=np.float32)
+    matrix = np.array([[s, np.sqrt(1.0 - s * s)] for _sid, _t, s in rows], dtype=np.float32)
+    fake = SimpleNamespace(primary="video", roles={"visual": "v", "semantic": "s"},
+                           spaces=SimpleNamespace(windows=lambda space: (keys, times, matrix)))
+    return Engine._read_windows(fake, query, [1, 2, 3])
+
+
+QUERY = np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32) / np.sqrt(2.0)
+
+
+def test_moment_candidates_are_the_top_three_windows_within_the_margin_best_first():
+    assert _moment_windows(QUERY) == {1: (0.0, 10.0, 30.0), 2: (5.0,), 3: (1.0,)}
+
+
+def test_moment_same_seed_same_time():
+    moments = _moment_windows(QUERY)[1]
+    assert {engine_module.choose_moment(moments, seed=1234, sid=1) for _ in range(20)} == {engine_module.choose_moment(moments, seed=1234, sid=1)}
+
+
+def test_moment_different_seeds_vary_among_the_candidates():
+    moments = _moment_windows(QUERY)[1]
+    drawn = {engine_module.choose_moment(moments, seed=seed, sid=1) for seed in range(50)}
+    assert len(drawn) > 1 and drawn <= set(moments)
+
+
+def test_moment_single_qualifying_window_is_unchanged():
+    moments = _moment_windows(QUERY)
+    for seed in range(20):
+        assert engine_module.choose_moment(moments[2], seed=seed, sid=2) == 5.0
+        assert engine_module.choose_moment(moments[3], seed=seed, sid=3) == 1.0
+
+
+def test_moment_selection_is_deterministic_across_two_runs():
+    def run():
+        read = _moment_windows(QUERY)
+        return [{sid: engine_module.choose_moment(times, seed=seed, sid=sid) for sid, times in read.items()} for seed in (0, 7, 2**62)]
+    assert run() == run()

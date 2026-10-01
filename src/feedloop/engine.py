@@ -44,6 +44,10 @@ DEFAULT_ATTRIBUTION = {"window_s": ledger.ATTRIBUTION_WINDOW_S, "policy_revision
                        "min_advance_s": ledger.ATTRIBUTION_MIN_ADVANCE_S}
 _OMITTED = object()
 WINDOWS_MEMO_MAX = 200_000
+# 2026-09-30 (varied matching moment): an item's moment is drawn among at most MOMENT_TOP of its
+# best-scoring windows that score within MOMENT_MARGIN (cosine) of its best one, seeded by the page.
+MOMENT_TOP = 3
+MOMENT_MARGIN = 0.02
 
 
 def _iso(ts: float) -> str:
@@ -77,8 +81,18 @@ def random_control(candidates, exclude, *, eligible_ids=None, seed=0):
     return min(pool, key=lambda c: (hashlib.md5((str(c) + str(seed)).encode()).hexdigest(), c))
 
 
+def choose_moment(times, *, seed, sid):
+    """One of an item's qualifying window times, best first: the page seed and the item id
+    seed the draw, so a fixed seed reproduces the moment whatever else the page holds."""
+    if not times:
+        return None
+    if len(times) == 1:
+        return times[0]
+    return times[int(np.random.default_rng([seed, sid]).integers(len(times)))]
+
+
 def best_windows(query, ids, *, read, revision, cache, memo_max=WINDOWS_MEMO_MAX):
-    """read(query, ids) -> {id: t} through a per-(query, id) memo.
+    """read(query, ids) -> {id: moments} through a per-(query, id) memo.
 
     2026-09-16, upstreamed 2026-09-26: a best window depends only on the item's committed
     embeddings and the exact query vector, so it is memoized under revision(); a reset of
@@ -484,7 +498,8 @@ class Engine:
         return None if None in revisions else _digest(revisions)
 
     def _read_windows(self, query, ids):
-        """{id: t} of each primary item's frame window best matching query in the paired look space."""
+        """{id: (t, ...)} of each primary item's frame windows matching query in the paired look
+        space: its best window first, then up to MOMENT_TOP - 1 more within MOMENT_MARGIN of it."""
         wanted, halves = {(self.primary, int(i)) for i in ids}, {}
         spaces = (self.roles["visual"], self.roles["semantic"])
         for space in spaces:
@@ -498,14 +513,17 @@ class Engine:
                     length = float(np.linalg.norm(vector))
                     if length > 0:
                         halves.setdefault((key[1], float(times[row])), {})[space] = vector / length
-        best = {}
+        scored = {}
         for (sid, t), pair in halves.items():
             if len(pair) != 2:
                 continue
             score = float(np.concatenate([pair[spaces[0]], pair[spaces[1]]]) / np.sqrt(2.0) @ query)
-            if sid not in best or score > best[sid][1]:
-                best[sid] = (t, score)
-        return {sid: t for sid, (t, _score) in best.items()}
+            scored.setdefault(sid, []).append((-score, t))
+        moments = {}
+        for sid, windows in scored.items():
+            top = sorted(windows)[:MOMENT_TOP]
+            moments[sid] = tuple(t for negative, t in top if negative - top[0][0] <= MOMENT_MARGIN)
+        return moments
 
     def _prepared_rank(self, context, config, seed, kinds, pin, page_size, prepare=None):
         """The host's prepared components through the public rank_page, unchanged.
