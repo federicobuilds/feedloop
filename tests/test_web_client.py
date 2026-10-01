@@ -75,6 +75,15 @@ def test_feed_jump_to_moment_uses_the_served_moment_and_the_player_start():
     assert 'item.media_url + "#t=" + video.__start' in cards
 
 
+def test_grid_cards_use_host_preview_and_open_urls():
+    cards = (web_root() / "cards.js").read_text()
+    thumb = cards[cards.index("function thumb("):cards.index("const SIDECAR_REASONS")]
+    # open_url makes the card media a real link; preview_url feeds only the muted hover preview
+    assert 'document.createElement(page ? "a" : "button")' in thumb and "opener.href = page" in thumb
+    assert "if (page) return box;" in thumb and "openVideo(video, item, null, preview)" in thumb
+    assert 'video.src = item.media_url + "#t=" + video.__start' in thumb and "item.preview_url" not in cards[:cards.index("function thumb(")]
+
+
 def test_feed_page_carries_the_fields_the_cards_read(ctx):
     ctx.clock.advance(30)
     status, page = request(ctx, "POST", "/api/feed", feed_request())

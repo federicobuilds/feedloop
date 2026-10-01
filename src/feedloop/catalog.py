@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from urllib.parse import urlsplit
 
 from feedloop.ranking import fingerprint_groups
 from feedloop.slots import AuthorityError, MissingKeys, ResponseError, TransportError
@@ -24,6 +25,22 @@ PAGE_SIZE = 500
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def host_links(row):
+    """The optional ``preview_url`` and ``open_url`` of a catalog row, kept only when each is an
+    http(s) URL or a root-relative path; anything else is dropped."""
+    links = {}
+    for field in ("preview_url", "open_url"):
+        value = row.get(field)
+        if not isinstance(value, str):
+            continue
+        parts = urlsplit(value)
+        absolute = parts.scheme.lower() in ("http", "https") and parts.netloc
+        root_relative = not parts.scheme and not parts.netloc and value.startswith("/") and not value.startswith(("//", "/\\"))
+        if absolute or root_relative:
+            links[field] = value
+    return links
 
 
 class CatalogMissing(Exception):

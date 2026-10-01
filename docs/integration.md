@@ -297,10 +297,18 @@ Each item row has:
 | `title` | `str` | Display title. |
 | `duration_s` | `float` | Seconds. `0` or less means unknown. |
 | `media_url` | `str` | Where the client plays it. |
+| `preview_url` | `str`, optional | A short silent clip that grid cards (Home, Search, Similar) play as the hover preview instead of `media_url`. |
+| `open_url` | `str`, optional | The host's own page for the item. Clicking a grid card's media opens it in the same tab, as a real link, instead of the inline player. |
 | `tags` | `list[str]` | Display strings. |
 | `contributor_ids` | `list[str]` | Trusted contributor ids; these, not display names, drive affinity. |
 | `updated` | opaque token | May move on any metadata touch. Not part of ranking identity. |
 | `files` | `list` | `[]` for a fileless item; else `{"fingerprints": [{"type": str, "value": str}, ...]}` per file. |
+
+`preview_url` and `open_url` must be `http://` or `https://` URLs or
+root-relative paths (`/...`); any other value, or a non-string, is dropped
+before the item reaches the client. The engine copies them onto Feed,
+Search and Similar items next to `title` and `media_url`. The Feed player
+ignores both.
 
 `features(keys)` returns, per key, `{"tag_seconds": {tag_id: seconds},
 "watched_tag_seconds": {...} | None, "tag_categories": {tag_id: category}}`
