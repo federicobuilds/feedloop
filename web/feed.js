@@ -6,7 +6,7 @@ import { deliverFeed, isStaleCursor, itemKey } from "./api.js";
 import { building, formatTime, partial, setState } from "./state.js";
 import { evidenceStrip, explanation } from "./explain.js";
 import { feedbackControls } from "./feedback.js";
-import { media, metaLine, openViewer, similarLink, stopVideos, whyText } from "./cards.js";
+import { media, metaLine, openHref, openViewer, servedMoment, similarLink, stopVideos, whyText } from "./cards.js";
 import { observeView } from "./watch.js";
 import { icon } from "./icons.js";
 
@@ -19,7 +19,7 @@ function ownsKeys(target) {
    item carries open_url, the full-size viewer otherwise. It rides the same keydown guards
    as the video shortcuts below (ownsKeys and the modifier check). */
 function openImage(item, opener) {
-  if (item.open_url) window.location.assign(item.open_url);
+  if (item.open_url) window.location.assign(openHref(item, servedMoment(item)));
   else openViewer(item, opener);
 }
 
@@ -160,6 +160,17 @@ export function mountFeed(host) {
           start(video);
         };
         extras.push(jump);
+      }
+      // 2026-10-10: the host's full item at the player's current moment; a real link, so middle-click opens a new tab
+      if (video && item.open_url) {
+        const full = document.createElement("a");
+        full.className = "action open-full";
+        full.setAttribute("aria-label", "Open full video at this moment"); full.title = full.getAttribute("aria-label");
+        full.append(icon("external"), "Open full");
+        const moment = () => { full.href = openHref(item, video.getAttribute("src") && video.readyState ? video.currentTime : servedMoment(item)); };
+        moment();
+        ["pointerdown", "focus", "contextmenu", "click"].forEach(type => full.addEventListener(type, moment));
+        extras.push(full);
       }
       if (item.kind === "video") extras.push(similarLink(item, false));
       const hint = document.createElement("p"); hint.className = "feed-hint";

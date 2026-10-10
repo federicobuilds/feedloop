@@ -7,6 +7,13 @@ from feedloop.slots import AuthorityError, MissingKeys, ResponseError, Transport
 from fl2_helpers import MemoryCatalog, catalog_row, md5_file
 
 
+def test_host_links_keep_the_moment_placeholder():
+    row = {"preview_url": "/p/1.mp4", "open_url": "/items/1?t={t}"}
+    assert catalog.host_links(row) == row
+    absolute = {"open_url": "https://host.example/items/1#t={t}"}
+    assert catalog.host_links(absolute) == absolute
+
+
 class Source:
     """Scripted Catalog slot: ``fetch`` is a callable (keys) -> payload or raising."""
 

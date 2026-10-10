@@ -14,6 +14,7 @@ const PATHS = {
   moment: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   sound: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>',
   muted: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="m16 9 5 6M21 9l-5 6"/>',
+  external: '<path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   feed: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="m10 8.5 5 3.5-5 3.5z"/>',

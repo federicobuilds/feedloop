@@ -121,7 +121,9 @@ and works offline. It calls only the server's public routes (`/api/feed`,
   that player counts as watching; the preview does not. A
   catalog item may carry `preview_url` (a short silent clip the hover
   preview plays instead) and `open_url` (the host's own page, which a card
-  click opens instead of the inline player). A catalog item may carry
+  click opens instead of the inline player; a literal `{t}` in it becomes whole
+  seconds at click time, and a Feed video cell then shows an Open full link at
+  the player's current moment). A catalog item may carry
   `animated_image: true` when its media is an animated image (GIF or similar):
   cards, Feed and the Similar seed then render an `<img>` that plays natively,
   never a player, and it records no watch time. An
@@ -314,6 +316,7 @@ names and types, the attribution rules, and a synthetic capture example.
 
 ## Limits (v0.x)
 
+- 0.8.5: a literal `{t}` in `open_url` becomes whole seconds at click time; Feed video cells show an Open full link to the host page at the player's current moment.
 - 0.8.4: Feed, Search and Similar items (and the Similar seed) carry the item's Signals rating as `rating100`; an item with a qualified view in the last `recent_view_hours` (default 24, 0 disables; needs `impression_discount` below 1) stays out of fresh Feed pages unless the library is too small to fill the page.
 - 0.8.3: animated_image catalog flag renders GIF-style media as an `<img>` on cards, Feed and the Similar seed, with no player or watch capture.
 - 0.8.2: tuner evidence is scoped to the active experiment's cohort; a trial-level problem excludes that trial only, unlinked records are diagnostics, and the scorecard shows recorded, evaluable and excluded counts per arm.

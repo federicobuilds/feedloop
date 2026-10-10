@@ -32,6 +32,19 @@ function startOf(item) {
   return duration ? Math.round(duration * 10) / 100 : 0;
 }
 
+/* The served moment clamped to the known duration, or 0: where the host page should open. */
+export function servedMoment(item) {
+  const moment = item.best_t != null ? item.best_t : item.search && item.search.best_t;
+  if (typeof moment !== "number" || !(moment >= 0)) return 0;
+  const duration = durationOf(item);
+  return duration ? Math.min(moment, duration) : moment;
+}
+
+/* open_url with each literal {t} replaced by whole seconds; nothing else is encoded or changed. */
+export function openHref(item, seconds) {
+  return item.open_url.split("{t}").join(String(Math.max(0, Math.floor(seconds) || 0)));
+}
+
 function titleOf(item) { return item.title || ("Item " + item.id); }
 
 function reasonText(item, video) {
@@ -173,7 +186,7 @@ function thumb(item, eager) {
   const box = document.createElement("div");
   box.className = "thumb";
   if (!item.media_url) return placeholder(box);
-  const page = item.open_url;
+  const page = item.open_url && openHref(item, servedMoment(item));
   const opener = document.createElement(page ? "a" : "button");
   if (page) opener.href = page; else opener.type = "button";
   opener.className = "thumb-open";

@@ -75,6 +75,22 @@ def test_feed_jump_to_moment_uses_the_served_moment_and_the_player_start():
     assert 'item.media_url + "#t=" + video.__start' in cards
 
 
+def test_open_url_moment_placeholder_and_feed_open_full_link():
+    root = web_root()
+    cards, feed, icons = ((root / name).read_text() for name in ("cards.js", "feed.js", "icons.js"))
+    # {t} becomes whole seconds at click time; nothing else in open_url is touched
+    assert 'item.open_url.split("{t}").join(String(Math.max(0, Math.floor(seconds) || 0)))' in cards
+    assert "Math.min(moment, duration)" in cards[cards.index("export function servedMoment"):cards.index("export function openHref")]
+    # grid cards link with the served moment; so does the Feed image stage
+    assert "const page = item.open_url && openHref(item, servedMoment(item))" in cards
+    assert "window.location.assign(openHref(item, servedMoment(item)))" in feed
+    # the Feed video cell carries a real link, only with open_url, at the player's current time
+    full = feed[feed.index("if (video && item.open_url)"):feed.index("extras.push(full)")]
+    assert 'document.createElement("a")' in full and '"Open full video at this moment"' in full
+    assert 'icon("external")' in full and "external:" in icons
+    assert "video.currentTime : servedMoment(item)" in full and '"pointerdown", "focus", "contextmenu", "click"' in full
+
+
 def test_grid_cards_use_host_preview_and_open_urls():
     cards = (web_root() / "cards.js").read_text()
     thumb = cards[cards.index("function thumb("):cards.index("const SIDECAR_REASONS")]
