@@ -1,12 +1,10 @@
 # Integrating feedloop
 
-feedloop ships the recommendation brain: ranking, a profile from watch
-history, an append-only evidence ledger, attribution, a self-tuner, a serving
-contract and a web client. It does not ship your content, your users'
-behavior or your item vectors. To run it you supply three inputs. This
-document describes each one as the code accepts it. Field names and types are
-exact; when the code leaves something open, this says what the code does
-rather than inventing behavior.
+FeedLoop ships a standalone folder ingest path and a recommendation engine.
+The built-in filesystem source provides a catalog. Ingest supplies the
+embeddings, and the web client can record feedback as you use the feed.
+An application with its own catalog, vectors or capture can provide them
+through the interfaces below.
 
 The three inputs:
 
@@ -18,6 +16,30 @@ The three inputs:
 The engine reads all three through six slots (`feedloop.slots`): `Catalog`,
 `Signals`, `FeatureSpaces`, `TextEncoder`, `IdentityLinks` and `Annotator`.
 It never opens a host database, socket or file by itself.
+
+## Run ingest on your compute
+
+```sh
+pip install 'feedloop[extract]'
+feedloop ingest ./media --model ViT-B-32
+feedloop serve ./media --init
+```
+
+CPU is the default. Pass `--device cuda` with a compatible NVIDIA CUDA or
+AMD ROCm PyTorch install. FeedLoop runs on the machine where you invoke it.
+To use Runpod, create a Pod with your own account, install FeedLoop inside it
+and run `feedloop ingest ./media --model ViT-B-32 --device cuda` there.
+Keep the media and the state directory available to the instance that will
+serve the results. Provisioning, charges and Pod teardown are managed by
+your deployment tooling. If you automate that with the Runpod API, keep
+the API key in your deployment environment. A private container image also
+requires registry credentials. [Runpod credentials](https://docs.runpod.io/get-started/credentials)
+
+When supplying your own model, implement `extract_rows(folder, rows)` and
+pass the adapter to `feedloop.ingest.ingest_space`. Use a distinct feature
+space for each model recipe and select the desired space with
+`feedloop serve --space-role visual=SPACE`. Adding a file and rerunning
+ingest reuses completed work for unchanged items with the same recipe.
 
 ## Bring your own capture
 
