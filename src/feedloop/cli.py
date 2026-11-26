@@ -120,6 +120,22 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--device", default="cpu")
     ingest.add_argument("--overwrite", action="store_true", help="rebuild the space using the chosen model")
     ingest.set_defaults(run=run_ingest)
+    pipeline = commands.add_parser("pipeline", help="run an incremental multi-stage model pipeline")
+    _common(pipeline, state_default=None)
+    pipeline.add_argument("--stages", type=Path, required=True, help="JSON stage manifest")
+    pipeline.add_argument("--provider", choices=("local", "runpod"), default="local")
+    pipeline.add_argument("--allow-remote", action="store_true", help="authorize sending selected media to your Pod")
+    pipeline.add_argument("--image", help="worker image with FeedLoop and the manifest's adapters installed")
+    pipeline.add_argument("--gpu", help="Runpod GPU catalog ID")
+    pipeline.add_argument("--ssh-key", type=Path, help="operator's Ed25519 SSH private key; .pub must also exist")
+    pipeline.add_argument("--registry", help="optional Runpod private registry credential ID")
+    pipeline.add_argument("--max-hourly-rate", type=float, help="maximum GPU compute rate in USD per hour")
+    pipeline.add_argument("--min-cuda", default="12.8")
+    pipeline.add_argument("--disk", type=int, default=30, help="ephemeral Pod disk size in GB")
+    pipeline.set_defaults(run=run_pipeline_command)
+    cleanup = commands.add_parser("pipeline-cleanup", help="reconcile a tracked Runpod allocation from an interrupted pipeline")
+    cleanup.add_argument("--state", type=Path, required=True, help="state directory passed to the pipeline")
+    cleanup.set_defaults(run=run_pipeline_cleanup)
     return parser
 
 
@@ -247,6 +263,59 @@ def run_ingest(args):
         return 2
     print(json.dumps(report, sort_keys=True))
     return 1 if report["skipped"] else 0
+
+
+
+def run_pipeline_command(args):
+    import json
+    import signal
+
+    from feedloop.folder_pipeline import load_stages, run_folder
+    from feedloop.remote_pipeline import runpod_compute
+    from feedloop.runpod import hourly_rate
+    from feedloop.sources.filesystem import FilesystemSource
+
+    compute = None
+    try:
+        if args.provider == "runpod":
+            if not args.allow_remote or not args.image or not args.gpu or not args.ssh_key or args.max_hourly_rate is None:
+                raise ValueError("Runpod needs --allow-remote, --image, --gpu, --ssh-key, and --max-hourly-rate")
+            hourly_rate(args.max_hourly_rate)
+            if args.disk <= 0 or not args.ssh_key.is_file() or not args.ssh_key.with_name(args.ssh_key.name + ".pub").is_file():
+                raise ValueError("Runpod needs a positive disk size and an existing SSH key pair")
+            compute = runpod_compute(_state_dir(args), image=args.image, gpu=args.gpu, ssh_key=args.ssh_key,
+                                     max_hourly_rate=args.max_hourly_rate, disk=args.disk, min_cuda=args.min_cuda,
+                                     registry=args.registry)
+        stages = load_stages(args.stages)
+        source = FilesystemSource(args.folder, _state_dir(args))
+        def interrupt(_number, _frame):
+            raise KeyboardInterrupt
+        previous = signal.signal(signal.SIGTERM, interrupt) if threading.current_thread() is threading.main_thread() else None
+        try:
+            report = run_folder(source, stages, _state_dir(args), compute=compute)
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+    except KeyboardInterrupt:
+        print("feedloop: pipeline stopped", file=sys.stderr)
+        return 130
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+        print(f"feedloop: error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, sort_keys=True))
+    return 1 if report["failed"] or any(space["skipped"] for space in report["publication"].values()) else 0
+
+
+def run_pipeline_cleanup(args):
+    from feedloop.remote_pipeline import cleanup_runpod
+
+    try:
+        cleanup_runpod(args.state)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"feedloop: error: {exc}", file=sys.stderr)
+        return 2
+    print("FeedLoop Runpod cleanup confirmed")
+    return 0
 
 
 def main(argv=None) -> int:

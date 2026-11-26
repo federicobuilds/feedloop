@@ -225,9 +225,9 @@ space for another model. CPU is the default. A compatible local Torch install
 can select a GPU with `--device cuda`.
 
 Local ingestion has no overall runtime limit. Add files and run the same
-command again to pick up new or changed items. For a self-managed Runpod GPU,
-run the same command inside a CUDA-capable Pod. See
-[compute and credentials](docs/integration.md#run-ingest-on-your-compute).
+command again to pick up new or changed items. For multiple model stages, use the [FeedLoop pipeline](docs/pipeline.md).
+It supports local compute and automatic Runpod launch and teardown with
+your own account.
 
 The first run downloads the weights into the Hugging Face cache,
 `~/.cache/huggingface/hub`. A bare open_clip architecture name loads pretrained

@@ -26,14 +26,10 @@ feedloop serve ./media --init
 ```
 
 CPU is the default. Pass `--device cuda` with a compatible NVIDIA CUDA or
-AMD ROCm PyTorch install. FeedLoop runs on the machine where you invoke it.
-To use Runpod, create a Pod with your own account, install FeedLoop inside it
-and run `feedloop ingest ./media --model ViT-B-32 --device cuda` there.
-Keep the media and the state directory available to the instance that will
-serve the results. Provisioning, charges and Pod teardown are managed by
-your deployment tooling. If you automate that with the Runpod API, keep
-the API key in your deployment environment. A private container image also
-requires registry credentials. [Runpod credentials](https://docs.runpod.io/get-started/credentials)
+AMD ROCm PyTorch install. The single-space `ingest` command runs where you
+invoke it. The multi-stage [pipeline](pipeline.md) supports local execution
+and manages a disposable Runpod worker with your own `RUNPOD_API_KEY`,
+including pricing checks, SSH and verified teardown.
 
 When supplying your own model, implement `extract_rows(folder, rows)` and
 pass the adapter to `feedloop.ingest.ingest_space`. Use a distinct feature
