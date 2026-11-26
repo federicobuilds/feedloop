@@ -17,6 +17,11 @@ serves a local web client with a feed, search, similar items and an Engine page
 that shows the evidence behind each decision. State lives in an append-only
 ledger next to your files.
 
+**Run the pipeline on Runpod** with the public
+[FeedLoop Docker image](https://hub.docker.com/r/federicobuilds/feedloop).
+The [Runpod quickstart](docs/pipeline.md#run-on-runpod) shows how to use your
+own API key and let FeedLoop create and tear down the GPU Pod.
+
 ## What you must bring yourself
 
 To run feedloop against a real library, three inputs are yours to provide.

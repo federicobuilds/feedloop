@@ -40,23 +40,28 @@ names and select them with `serve --space-role`.
 
 ## Run on Runpod
 
-Build a worker image using the same checkout as the controller. The provided
-Dockerfile uses a Runpod PyTorch base with SSH support. Include any custom
-adapters and their dependencies in the image. If your image is private,
-configure a Runpod registry credential and pass its ID with `--registry`.
+Use the public [FeedLoop image on Docker Hub](https://hub.docker.com/r/federicobuilds/feedloop).
+It includes the FeedLoop engine, pipeline CLI, worker, and extraction
+dependencies for NVIDIA CUDA 12.8. The image is built for Linux amd64.
+Runpod pulls it without Docker Hub credentials. Adapters download their model weights on first use when needed.
+
+Install the matching controller in a Python 3.11+ environment on macOS or Linux.
 
 ```sh
-docker build --platform linux/amd64 -f docker/pipeline.Dockerfile -t my-registry/feedloop-worker:my-version .
-docker push my-registry/feedloop-worker:my-version
+python -m pip install 'feedloop @ git+https://github.com/federicobuilds/feedloop.git@v0.10.0'
+ssh-keygen -t ed25519 -f ~/.ssh/feedloop_ed25519 -N ""
 ```
 
-Set `RUNPOD_API_KEY` in the controller environment and provide a dedicated
-Ed25519 key pair. Set `"device": "cuda"` in your GPU stage recipes. Select an
-available Runpod GPU catalog ID and a compute rate you approve.
+Use an existing dedicated Ed25519 key pair if you have one. Set
+`RUNPOD_API_KEY` in the controller's environment using your own
+[Runpod API key](https://console.runpod.io/user/settings). Save the stage
+manifest from the local example and add `"device": "cuda"` inside each GPU
+stage's `recipe`. Select a GPU available in your account and set your maximum
+hourly compute rate. The A40 and rate below are examples.
 
 ```sh
 feedloop pipeline ./media --stages stages.json --provider runpod --allow-remote \
-  --image my-registry/feedloop-worker:my-version --gpu 'NVIDIA A40' \
+  --image federicobuilds/feedloop:v0.10.0 --gpu 'NVIDIA A40' \
   --ssh-key ~/.ssh/feedloop_ed25519 --max-hourly-rate 0.59 --min-cuda 12.8
 ```
 
@@ -73,6 +78,20 @@ directory to reconcile it before retrying.
 ```sh
 feedloop pipeline-cleanup --state ./media/.feedloop
 ```
+
+### Build a custom worker image
+
+For custom adapters, use [the worker Dockerfile](../docker/pipeline.Dockerfile)
+from the same FeedLoop release as your controller. Add the adapter and its
+dependencies to the image so the worker can import it.
+
+```sh
+docker build --platform linux/amd64 -f docker/pipeline.Dockerfile -t my-registry/feedloop-worker:my-version .
+docker push my-registry/feedloop-worker:my-version
+```
+
+Pass the custom image with `--image`. For a private image, configure a Runpod
+registry credential and pass its ID with `--registry`.
 
 ## Supply a model
 
