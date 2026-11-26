@@ -71,6 +71,12 @@ streams the files required by pending stages. It uses ephemeral storage on
 the Pod and saves results on the controller. The account API key stays on
 the controller. Runpod mode supports macOS and Linux controllers.
 
+Verified on Runpod with the published `v0.10.0` image pinned by digest. One
+NVIDIA A40 ran four stages across two synthetic fixtures using PyTorch 2.9.1
+and CUDA 12.8. Both items were published to the controller's visual embedding
+space. An unchanged rerun reused all four results, and the Runpod API
+confirmed the pod was deleted.
+
 FeedLoop confirms teardown before publishing from the run. If an interruption
 leaves an allocation unresolved, use the same Runpod account and state
 directory to reconcile it before retrying.
