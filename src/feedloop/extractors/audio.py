@@ -111,15 +111,25 @@ class AudioExtractor:
         self.space = space
         if space in source.spaces() and not overwrite:
             return {"space": space, "model": self.model, "items": 0, "skipped": {}, "revision": source.revision(space), "kept_existing_space": True}
-        self.load()
         scan = source.refresh()
+        keys, vectors, skipped = self.extract_rows(source.folder, [(key, entry) for key, entry in sorted(scan["items"].items()) if key[0] == source.kinds[0]], batch_size=batch_size)
+        revision = None
+        if keys:
+            matrix = np.stack(vectors)
+            meta = {"provenance": f"clap:{self.model}", "window_scope": "none", "kind": "audio", "built_at": source.clock()}
+            revision = source.write_space(space, keys, matrix, meta=meta)
+        return {"space": space, "model": self.model, "items": len(keys), "skipped": skipped, "revision": revision}
+
+    def extract_rows(self, folder: Path, rows, *, batch_size=8):
+        """Embed only the selected catalog rows."""
         keys, vectors, skipped = [], [], {}
-        rows = [(key, entry) for key, entry in sorted(scan["items"].items()) if key[0] == source.kinds[0]]
+        if rows:
+            self.load()
         for start in range(0, len(rows), batch_size):
             batch, waves = [], []
             for key, entry in rows[start:start + batch_size]:
                 try:
-                    waveform, rate = self.decoder(source.folder / entry["relpath"])
+                    waveform, rate = self.decoder(folder / entry["relpath"])
                 except MissingExtra:
                     raise
                 except Exception as exc:
@@ -130,12 +140,7 @@ class AudioExtractor:
             if waves:
                 keys.extend(batch)
                 vectors.extend(unit_rows(self.backend.embed_audio(waves)))
-        revision = None
-        if keys:
-            matrix = np.stack(vectors)
-            meta = {"provenance": f"clap:{self.model}", "window_scope": "none", "kind": "audio", "built_at": source.clock()}
-            revision = source.write_space(space, keys, matrix, meta=meta)
-        return {"space": space, "model": self.model, "items": len(keys), "skipped": skipped, "revision": revision}
+        return keys, vectors, skipped
 
 
 __all__ = ["AudioExtractor", "ClapBackend", "ffmpeg_decoder", "soundfile_decoder", "resample", "unit_rows"]

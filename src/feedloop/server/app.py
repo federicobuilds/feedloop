@@ -106,7 +106,7 @@ def _int(values, name, default, low, high):
 
 
 def build_engine(folder, state_dir, *, api_key=None, clock=time.time, attribution=None, config=None, initialize=False, cutover_ts=None,
-                 automatic_tuning=True, demo_space=True):
+                 automatic_tuning=True, demo_space=True, space_roles=None):
     """Compose the filesystem source and an Engine over local stores. ``initialize``
     creates the stores explicitly (the ``demo`` command); ``serve`` never does."""
     source = FilesystemSource(folder, state_dir, media_prefix=MEDIA_PREFIX, clock=clock)
@@ -117,10 +117,16 @@ def build_engine(folder, state_dir, *, api_key=None, clock=time.time, attributio
         if demo_space and DEMO_SPACE not in source.spaces():
             build_text_hash_space(source, DEMO_SPACE)
     encoder = TextHashEncoder([DEMO_SPACE]) if DEMO_SPACE in source.spaces() else None
-    roles = DEMO_ROLES if DEMO_SPACE in source.spaces() else None
+    from feedloop.slots import DEFAULT_SPACE_ROLES
+
+    roles = dict(DEMO_ROLES if DEMO_SPACE in source.spaces() else DEFAULT_SPACE_ROLES)
+    for role, space in (space_roles or {}).items():
+        if role not in roles or space not in source.spaces():
+            raise ValueError(f"unknown recommendation role or feature space: {role}={space}")
+        roles[role] = space
     engine = Engine(catalog=source, signals=source, spaces=source, encoder=encoder, ledger_path=ledger_path, tuner_path=tuner_path,
                     read_current=source.read_current, apply_change=source.apply_change, attribution=attribution, config=config,
-                    automatic_tuning=automatic_tuning, clock=clock, **({"space_roles": roles} if roles else {}))
+                    automatic_tuning=automatic_tuning, clock=clock, space_roles=roles)
     return source, engine
 
 

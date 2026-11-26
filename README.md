@@ -195,6 +195,35 @@ feedloop extract ./my-media --kind visual --model ViT-B-32 --vocabulary tags.txt
 feedloop extract ./my-media --kind audio --model laion/clap-htsat-unfused
 ```
 
+
+For a folder you expect to keep adding to, use incremental ingest:
+
+```sh
+feedloop ingest ./my-media --model ViT-B-32
+feedloop serve ./my-media --init
+```
+
+The ingest command scans subfolders and writes learned features under the
+existing state directory. Run the same command after adding files. Completed
+items are reused when their contents and model recipe match. Failed or changed
+items can be retried. The serving engine reads the committed vectors in Similar
+and recommendations.
+
+To keep two visual models available, give the second one its own space and
+select it for serving. When bringing your own checkpoint, set
+`--model-revision` to an immutable checkpoint identifier.
+
+```sh
+feedloop ingest ./my-media --model ViT-B-16 --pretrained laion2b_s34b_b88k --space visual-b16
+feedloop serve ./my-media --space-role visual=visual-b16
+```
+
+The Python API `feedloop.ingest.ingest_space` accepts a custom extractor
+implementing `extract_rows(folder, rows)`. It returns item keys, vectors and
+per-item skip reasons. Use one model recipe per space and supply a separate
+space for another model. CPU is the default. A compatible local Torch install
+can select a GPU with `--device cuda`.
+
 The first run downloads the weights into the Hugging Face cache,
 `~/.cache/huggingface/hub`. A bare open_clip architecture name loads pretrained
 weights: `--pretrained TAG` picks the open_clip weights tag, the default for
@@ -316,6 +345,7 @@ names and types, the attribution rules, and a synthetic capture example.
 
 ## Limits (v0.x)
 
+- 0.9.0: incremental folder ingest with model-specific feature spaces and explicit serving-role selection.
 - 0.8.5: a literal `{t}` in `open_url` becomes whole seconds at click time; Feed video cells show an Open full link to the host page at the player's current moment.
 - 0.8.4: Feed, Search and Similar items (and the Similar seed) carry the item's Signals rating as `rating100`; an item with a qualified view in the last `recent_view_hours` (default 24, 0 disables; needs `impression_discount` below 1) stays out of fresh Feed pages unless the library is too small to fill the page.
 - 0.8.3: animated_image catalog flag renders GIF-style media as an `<img>` on cards, Feed and the Similar seed, with no player or watch capture.
@@ -359,7 +389,7 @@ src/feedloop/            the package (numpy only)
   sources/filesystem.py  Catalog, Signals and FeatureSpaces over a folder, sidecars and SQLite
   extractors/            optional visual (open CLIP) and audio (CLAP) extractors
   server/app.py          standard-library HTTP server
-  cli.py                 feedloop demo | serve | extract
+  cli.py                 feedloop demo | serve | extract | ingest
 docs/integration.md      capture, embeddings and catalog contracts for a custom host
 web/                     the client, packaged with the wheel
 scripts/verify_demo.py   portable end-to-end demonstration runner (real server, labelled fixtures)

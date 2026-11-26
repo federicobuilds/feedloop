@@ -97,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="serve an existing state directory with the production attribution policy")
     _common(serve, state_default=None)
     _serve_args(serve)
+    serve.add_argument("--space-role", action="append", default=[], metavar="ROLE=SPACE", help="select a feature space for a recommendation role")
     serve.add_argument("--init", action="store_true", help="explicitly create the stores when they do not exist yet")
     serve.set_defaults(run=run_serve)
     extract = commands.add_parser("extract", help="compute learned features with an optional extractor (needs pip install 'feedloop[extract]')")
@@ -109,6 +110,16 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--device", default="cpu")
     extract.add_argument("--overwrite", action="store_true", help="replace an existing space and the generated fields of existing <file>.generated.json files; user fields are always kept")
     extract.set_defaults(run=run_extract)
+    ingest = commands.add_parser("ingest", help="incrementally publish features from a folder to the feed")
+    _common(ingest, state_default=None)
+    ingest.add_argument("--kind", choices=("visual", "audio"), default="visual")
+    ingest.add_argument("--model", required=True)
+    ingest.add_argument("--pretrained", default=None, help="visual only: OpenCLIP weights tag")
+    ingest.add_argument("--model-revision", default=None, help="weights revision for a custom or updated checkpoint")
+    ingest.add_argument("--space", default=None, help="space to write (default: visual or audioembed)")
+    ingest.add_argument("--device", default="cpu")
+    ingest.add_argument("--overwrite", action="store_true", help="rebuild the space using the chosen model")
+    ingest.set_defaults(run=run_ingest)
     return parser
 
 
@@ -127,10 +138,19 @@ def _serve(args, *, initialize: bool, attribution):
         return 2
     api_key = args.api_key or os.environ.get("FEEDLOOP_API_KEY") or new_api_key()
     try:
-        source, engine = build_engine(folder, state, initialize=initialize, attribution=attribution)
+        from feedloop.slots import DEFAULT_SPACE_ROLES
+
+        roles = {}
+        for mapping in getattr(args, "space_role", []):
+            role, _, space = mapping.partition("=")
+            if role not in DEFAULT_SPACE_ROLES or not space or role in roles:
+                raise ValueError(f"invalid or duplicate space role: {mapping}")
+            roles[role] = space
+        source, engine = build_engine(folder, state, initialize=initialize, attribution=attribution,
+                                      space_roles=roles, demo_space=attribution is not None)
         app = FeedloopApp(engine, api_key=api_key, allowed_origins=origins_for(args.host, args.port or 0), source=source)
         server = run_server(app, args.host, args.port)
-    except (OSError, sqlite3.Error, ledger.ContractError) as exc:
+    except (OSError, ValueError, sqlite3.Error, ledger.ContractError) as exc:
         print(f"feedloop: error: {exc}", file=sys.stderr)
         return 2
     port = server.server_address[1]
@@ -197,6 +217,36 @@ def run_extract(args):
         return 2
     print(report)
     return 0
+
+
+def run_ingest(args):
+    import json
+    from feedloop.extractors import MissingExtra, MissingWeights
+    from feedloop.ingest import ingest_space
+    from feedloop.sources.filesystem import FilesystemSource
+
+    try:
+        source = FilesystemSource(args.folder, _state_dir(args))
+        recipe = {"kind": args.kind, "model": args.model, "model_revision": args.model_revision,
+                  "pretrained": args.pretrained, "version": 1}
+        if args.kind == "visual":
+            from feedloop.extractors.visual import VisualExtractor
+
+            extractor = VisualExtractor(args.model, device=args.device, pretrained=args.pretrained)
+            kinds, space = source.kinds, args.space or "visual"
+        else:
+            from feedloop.extractors.audio import AudioExtractor
+
+            if args.pretrained is not None:
+                raise ValueError("--pretrained applies only to visual models")
+            extractor = AudioExtractor(args.model, device=args.device)
+            kinds, space = source.kinds[:1], args.space or "audioembed"
+        report = ingest_space(source, extractor, space=space, recipe=recipe, kinds=kinds, replace=args.overwrite)
+    except (OSError, ValueError, sqlite3.Error, MissingExtra, MissingWeights) as exc:
+        print(f"feedloop: error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, sort_keys=True))
+    return 1 if report["skipped"] else 0
 
 
 def main(argv=None) -> int:

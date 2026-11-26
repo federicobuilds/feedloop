@@ -685,7 +685,7 @@ class FilesystemSource:
     def space_meta(self, space):
         return self._read_space_meta(space)
 
-    def write_space(self, space: str, keys, matrix, *, meta: Mapping[str, Any], windows=None):
+    def write_space(self, space: str, keys, matrix, *, meta: Mapping[str, Any], windows=None, expected_meta=None):
         """Store one feature space. ``meta`` must name its ``provenance`` and ``window_scope``
         (``"timed"`` with real per-window timestamps, else ``"none"``: means only, no
         invented window rows); the revision is the digest of the stored arrays and meta."""
@@ -711,10 +711,16 @@ class FilesystemSource:
         arrays["meta"] = np.array([json.dumps(stored, sort_keys=True)])
         self.spaces_dir.mkdir(parents=True, exist_ok=True)
         path = self._space_path(space)
-        temporary = path.with_suffix(".npz.tmp")
-        with open(temporary, "wb") as handle:
-            np.savez(handle, **arrays)
-        os.replace(temporary, path)
+        with self._connection(write=True):
+            if expected_meta is not None and (self.space_meta(space),) != expected_meta:
+                raise ValueError("feature space changed during ingest; rerun to reuse the latest results")
+            temporary = path.with_suffix(".npz.tmp")
+            try:
+                with open(temporary, "wb") as handle:
+                    np.savez(handle, **arrays)
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
         return stored["revision"]
 
 

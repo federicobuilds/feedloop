@@ -153,14 +153,38 @@ class VisualExtractor:
         if space in source.spaces() and not overwrite:
             return {"space": space, "model": self.model, "items": 0, "skipped": {}, "revision": source.revision(space), "zero_shot_tags": {},
                     "generated_files_kept": [], "kept_existing_space": True}
-        self.load()
         scan = source.refresh()
-        keys, vectors, skipped, tagged = [], [], {}, {}
-        rows = sorted(scan["items"].items())
+        keys, vectors, skipped = self.extract_rows(source.folder, sorted(scan["items"].items()), batch_size=batch_size)
+        matrix = np.stack(vectors) if vectors else np.zeros((0, 1), dtype=np.float32)
+        tagged = {}
+        kept_existing, unwritable = [], {}
+        if write_tags and self.vocabulary and keys:
+            for key, tags in zip(keys, self.tags_for(matrix)):
+                tagged[f"{key[0]}:{key[1]}"] = tags
+                entry = scan["items"][key]
+                reason = entry["sidecar"].get("_reason")
+                if reason in ("sidecar_path_too_long", "sidecar_unreadable"):
+                    unwritable[f"{key[0]}:{key[1]}"] = reason
+                elif write_generated_tags(source, key, tags, model=self.model, overwrite=overwrite, relpath=entry["relpath"]) is None:
+                    kept_existing.append(f"{key[0]}:{key[1]}")
+            if len(kept_existing) + len(unwritable) < len(keys):
+                source.refresh()
+        revision = None
+        if keys:
+            meta = {"provenance": f"open_clip:{self.model}", "window_scope": "none", "kind": "visual", "built_at": source.clock()}
+            revision = source.write_space(space, keys, matrix, meta=meta)
+        return {"space": space, "model": self.model, "items": len(keys), "skipped": skipped, "revision": revision, "zero_shot_tags": tagged,
+                "generated_files_kept": kept_existing, "generated_files_unwritable": unwritable}
+
+    def extract_rows(self, folder: Path, rows, *, batch_size=16):
+        """Embed only the selected catalog rows."""
+        keys, vectors, skipped = [], [], {}
+        if rows:
+            self.load()
         for start in range(0, len(rows), batch_size):
             batch, images = [], []
             for key, entry in rows[start:start + batch_size]:
-                path = source.folder / entry["relpath"]
+                path = folder / entry["relpath"]
                 if key[0] == "image":
                     try:
                         images.append(self.backend.open_image(path))
@@ -188,25 +212,7 @@ class VisualExtractor:
                 embedded = unit_rows(self.backend.embed_images(images))
                 keys.extend(batch)
                 vectors.extend(embedded)
-        matrix = np.stack(vectors) if vectors else np.zeros((0, 1), dtype=np.float32)
-        kept_existing, unwritable = [], {}
-        if write_tags and self.vocabulary and keys:
-            for key, tags in zip(keys, self.tags_for(matrix)):
-                tagged[f"{key[0]}:{key[1]}"] = tags
-                entry = scan["items"][key]
-                reason = entry["sidecar"].get("_reason")
-                if reason in ("sidecar_path_too_long", "sidecar_unreadable"):
-                    unwritable[f"{key[0]}:{key[1]}"] = reason
-                elif write_generated_tags(source, key, tags, model=self.model, overwrite=overwrite, relpath=entry["relpath"]) is None:
-                    kept_existing.append(f"{key[0]}:{key[1]}")
-            if len(kept_existing) + len(unwritable) < len(keys):
-                source.refresh()
-        revision = None
-        if keys:
-            meta = {"provenance": f"open_clip:{self.model}", "window_scope": "none", "kind": "visual", "built_at": source.clock()}
-            revision = source.write_space(space, keys, matrix, meta=meta)
-        return {"space": space, "model": self.model, "items": len(keys), "skipped": skipped, "revision": revision, "zero_shot_tags": tagged,
-                "generated_files_kept": kept_existing, "generated_files_unwritable": unwritable}
+        return keys, vectors, skipped
 
 
 GENERATED_FIELDS = ("model", "method", "tags")
